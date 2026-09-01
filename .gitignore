@@ -1,0 +1,20 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+
+# Build artifacts
+*.o
+*.a
+*.elf
+*.map
+*.bin
+*.hex
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.cache/
+compile_commands.json
