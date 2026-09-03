@@ -20,11 +20,16 @@
 
 class Waveshare35B {
 public:
-    static constexpr uint16_t WIDTH = 320;
-    static constexpr uint16_t HEIGHT = 480;
+    // Logical (landscape) resolution: the 320x480 panel is rotated by
+    // MX5_LCD_ROTATION so LVGL lays out in 480x320.
+    static constexpr uint16_t WIDTH = 480;
+    static constexpr uint16_t HEIGHT = 320;
 
     bool begin();
     void loop(); // advances LVGL
+
+    static void setRotation(uint8_t rotation);
+    static uint8_t getRotation();
 
 private:
     void initPower();
@@ -32,7 +37,6 @@ private:
     lv_display_t* createDisplay();
     lv_indev_t* createInput();
 
-    uint32_t millis_cb();
     static void my_disp_flush(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map);
     static void my_touchpad_read(lv_indev_t* indev, lv_indev_data_t* data);
 };

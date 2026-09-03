@@ -1,24 +1,37 @@
 #pragma once
 
+#ifdef ARDUINO
 #include <Arduino.h>
 #include <IPAddress.h>
+#endif
 
 /**
  * mx5_config - All setup knobs that need to change for a given car/dongle.
  */
 
 // ---------------------------------------------------------------------------
-// Wi-Fi ELM327 adapter
-//
-// The adapter creates its own access point (typically a hidden network).
-// The ESP32 joins it as a station and opens a raw TCP socket to the adapter's
-// ELM327 command server on the port below. Most Wi-Fi ELM327 dongles use
-// 192.168.0.10:35000.
+// Hardware & Display Settings (ESP32-S3 + Waveshare 3.5" 480x320)
 // ---------------------------------------------------------------------------
-#define MX5_DONGLE_SSID  "V-LINK"                // adapter AP SSID
-#define MX5_DONGLE_PASS  "12345678"              // adapter AP password
-#define MX5_DONGLE_PORT  35000
-#define MX5_DONGLE_IP    IPAddress(192, 168, 0, 10)
+#define MX5_LCD_ROTATION 3                       // 3 = 270 deg CW (USB Right), 1 = 90 deg CW (USB Left)
+#define MX5_UNITS_US     1                       // 1 = US (MPH / °F / PSI), 0 = Metric (km/h / °C / bar)
+#define MX5_HOR_RES      480
+#define MX5_VER_RES      320
+#define MX5_BACKLIGHT_DAY_PCT   95               // Default day brightness %
+#define MX5_BACKLIGHT_NIGHT_PCT 25               // Default night brightness %
+#define MX5_AUTO_DIM_ENABLED    1
+#define MX5_DIM_CHECK_INTERVAL_MS 3000
+#define MX5_NIGHT_VOLTS_THRESHOLD 12.8f
+#define MX5_PIN_BACKLIGHT       45
+#define MX5_LEDC_BACKLIGHT_CH   0
+
+// ---------------------------------------------------------------------------
+// BLE ELM327 adapter (Vgate vLinker MS / MC+ / BLE OBD2)
+//
+// The ESP32-S3 scans for the BLE advertisement matching the device name prefix
+// (e.g. "vLinker", "V-LINK", "OBDII") and auto-connects to its GATT serial
+// service. Once connected, it communicates via ELM327 ASCII protocol.
+// ---------------------------------------------------------------------------
+#define MX5_BLE_DEVICE_PREFIX "vLinker"          // Matches "vLinker MS ...", "vLinker MC ...", etc.
 
 // ---------------------------------------------------------------------------
 // TPMS (Mode 22 manufacturer PIDs, MS-CAN). The 2022 MX-5 ND2 SkyActiv-G
@@ -28,7 +41,7 @@
 // tire to a distinct pressure, drive briefly, then map readings in the
 // TPMS_WHEEL_FROM_* tables below.
 // ---------------------------------------------------------------------------
-#define MX5_TPMS_ENABLED 0                       // 1 once DID map is confirmed
+#define MX5_TPMS_ENABLED 1                       // 1 once DID map is confirmed
 #define MX5_TPMS_INTERVAL_MS 5000
 
 // DID table + which physical wheel each DID reports (calibrate!).

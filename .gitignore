@@ -12,6 +12,25 @@
 *.bin
 *.hex
 
+# Android Build & Gradle
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+.kotlin/
+OBD2Android/.gradle/
+OBD2Android/build/
+OBD2Android/app/build/
+OBD2Android/app/.cxx/
+OBD2Android/local.properties
+OBD2Android/.idea/
+OBD2Android/*.iml
+OBD2Android/app/*.iml
+OBD2Android/.kotlin/
+OBD2Android/captures/
+
 # OS / editor
 .DS_Store
 Thumbs.db

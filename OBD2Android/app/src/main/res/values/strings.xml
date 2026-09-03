@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">MX-5 Dash</string>
+    <string name="bt_permission_denied">Bluetooth permission denied</string>
+    <string name="bt_disconnected">Disconnected</string>
+    <string name="bt_connecting">Connecting…</string>
+    <string name="bt_connected">Connected: %s</string>
+    <string name="export_success">sys_prefs.ini exported successfully</string>
+    <string name="export_failed">Export failed</string>
+</resources>

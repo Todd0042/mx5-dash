@@ -6,6 +6,7 @@
 #include <Waveshare35B.h>
 #include <ObdService.h>
 #include <Mx5UI.h>
+#include "../lib/mx5_config/UserPrefs.h"
 
 // ---------------------------------------------------------------------------
 // mx5-dash
@@ -14,7 +15,7 @@
 //
 // Sizing/threading:
 //   core 1 : display + LVGL (this loop) - rendering/UI
-//   core 0 : ObdService FreeRTOS task     - Wi-Fi ELM327 polling
+//   core 0 : ObdService FreeRTOS task     - BLE ELM327 polling
 //
 // The UI task calls snapshot() (critical-section protected) every frame to
 // pull vehicle metrics across cores without blocking the OBD task.
@@ -30,16 +31,43 @@ void setup() {
 
     Serial.println("[main] booting...");
 
+    // Load all user preferences from NVS flash (falls back to Config.h defaults)
+    UserPrefs::loadAll();
+
     // Display + touch + LVGL live entirely on core 1 (this core).
     if (!display.begin()) {
         Serial.println("[main] FATAL: display init failed");
     }
 
+    // Apply saved rotation (must happen after display.begin())
+    uint8_t savedRot = UserPrefs::getRotation();
+    if (savedRot != MX5_LCD_ROTATION) {
+        display.setRotation(savedRot);
+    }
+
     // UI screens are built once up front.
     ui.begin();
 
+    // Apply saved theme & brightness after UI is built
+    uint8_t themeMode = UserPrefs::getThemeMode();
+    ui.setThemeMode((Mx5UI::ThemeMode)themeMode);
+
+    uint8_t savedBri = UserPrefs::getBrightness();
+    ui.setBrightness(savedBri);
+
     // OBD service: spins up its own task on core 0.
+    // Apply saved BLE prefix before starting scan
+    char blePrefix[32];
+    UserPrefs::getBlePrefix(blePrefix, sizeof(blePrefix));
+    obd.setBlePrefix(blePrefix);
+    obd.setBleScanTimeout(UserPrefs::getBleScanTimeout());
     obd.start();
+    obd.freeze(true);   // keep the task alive but idle until config completes
+
+    // First-time boot: run the 4-step setup wizard before the driving dashboard.
+    if (!UserPrefs::isConfigured()) {
+        ui.runSetupWizard();
+    }
 
     Serial.println("[main] ready");
 }

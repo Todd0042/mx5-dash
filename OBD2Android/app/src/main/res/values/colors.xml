@@ -1,0 +1,10 @@
+<resources>
+    <color name="mx5_bg">#0C0D0F</color>
+    <color name="mx5_panel">#15161A</color>
+    <color name="mx5_panel_border">#282C35</color>
+    <color name="mx5_accent">#C41230</color>
+    <color name="mx5_amber">#C44D00</color>
+    <color name="mx5_text">#FFFFFF</color>
+    <color name="mx5_dim">#8E949F</color>
+    <color name="mx5_ok">#22C55E</color>
+</resources>

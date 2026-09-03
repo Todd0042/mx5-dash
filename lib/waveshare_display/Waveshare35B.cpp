@@ -5,6 +5,8 @@
 #include <TCA9554.h>
 #include <Wire.h>
 
+#include <Config.h>
+
 // ---------- Pin definitions (Waveshare schematic) ----------
 #define PIN_QSPI_CS  12
 #define PIN_QSPI_CLK 5
@@ -19,6 +21,11 @@
 #define TCA_ADDR   0x20
 #define TCA_PWR_PIN 1
 
+// Panel native resolution (pre-rotation). WIDTH/HEIGHT above are the logical
+// 480x320 landscape space LVGL draws in.
+#define PANEL_W 320
+#define PANEL_H 480
+
 // AXS5106L capacitive touch controller
 #define TOUCH_I2C_ADDR 0x3B
 // Command frame used to read up to 2 touch points (finger-print format)
@@ -28,6 +35,16 @@ static const uint8_t TOUCH_CMD[11] = {0xb5, 0xab, 0xa5, 0x5a, 0x00, 0x00, 0x00, 
 static Arduino_ESP32QSPI* bus = nullptr;
 static Arduino_GFX* gfx = nullptr;
 static TCA9554 TCA(TCA_ADDR);
+static uint8_t currentLcdRotation = MX5_LCD_ROTATION;
+
+void Waveshare35B::setRotation(uint8_t rotation) {
+    currentLcdRotation = rotation;
+    if (gfx) gfx->setRotation(rotation);
+}
+
+uint8_t Waveshare35B::getRotation() {
+    return currentLcdRotation;
+}
 
 static lv_color_t* disp_draw_buf1 = nullptr;
 static lv_color_t* disp_draw_buf2 = nullptr;
@@ -96,13 +113,33 @@ void Waveshare35B::my_touchpad_read(lv_indev_t* indev, lv_indev_data_t* data) {
     uint16_t x = ((resp[2] & 0x0F) << 8) | resp[3];
     uint16_t y = ((resp[4] & 0x0F) << 8) | resp[5];
 
-    touch_x = x;
-    touch_y = y;
+    // The AXS5106L reports raw panel coordinates (native 320x480). Rotate them
+    // into the logical landscape space (480x320) to match currentLcdRotation.
+    uint16_t lx = x, ly = y;
+    switch (currentLcdRotation) {
+        case 1:  // 90 deg CW (USB left)
+            lx = y;
+            ly = (PANEL_W - 1) - x;
+            break;
+        case 2:  // 180 deg
+            lx = (PANEL_W - 1) - x;
+            ly = (PANEL_H - 1) - y;
+            break;
+        case 3:  // 270 deg CW (USB right) - default
+            lx = (PANEL_H - 1) - y;
+            ly = x;
+            break;
+        default:  // 0 = portrait, no transform
+            break;
+    }
+
+    touch_x = lx;
+    touch_y = ly;
     touch_active = true;
 
     data->state = LV_INDEV_STATE_PRESSED;
-    data->point.x = x;
-    data->point.y = y;
+    data->point.x = lx;
+    data->point.y = ly;
 }
 
 // ============================================================
@@ -162,7 +199,9 @@ bool Waveshare35B::begin() {
 
     bus = new Arduino_ESP32QSPI(PIN_QSPI_CS, PIN_QSPI_CLK, PIN_QSPI_D0,
                                 PIN_QSPI_D1, PIN_QSPI_D2, PIN_QSPI_D3);
-    gfx = new Arduino_AXS15231B(bus, -1 /*RST*/, 0 /*rotation*/, false, WIDTH, HEIGHT);
+    // constructor takes the NATIVE panel size (320x480); the odd rotation code
+    // swaps it to the logical 480x320 landscape space
+    gfx = new Arduino_AXS15231B(bus, -1 /*RST*/, MX5_LCD_ROTATION, false, PANEL_W, PANEL_H);
 
     if (!gfx->begin()) {
         Serial.println("[display] gfx->begin() failed");

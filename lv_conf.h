@@ -9,6 +9,12 @@
 #ifndef LV_CONF_H
 #define LV_CONF_H
 
+// Swipe navigation between the dash screens (Mx5UI::onGesture) requires
+// LVGL's gesture recognizer - disabled by default in v9 (see lv_conf_internal.h)
+// and needs LV_USE_FLOAT (lv_indev_gesture.h).
+#define LV_USE_FLOAT 1
+#define LV_USE_GESTURE_RECOGNITION 1
+
 #define LV_COLOR_DEPTH 16
 #define LV_COLOR_16_SWAP 1
 
@@ -22,9 +28,9 @@
 #define LV_USE_ASSERT_NULL 1
 #define LV_USE_ASSERT_MALLOC 1
 
-#define LV_MEM_CUSTOM 0
-#define LV_MEM_SIZE (128U * 1024U)
-#define LV_MEM_POOL_INCLUDE <stdlib.h>
+#define LV_USE_STDLIB_MALLOC  LV_STDLIB_CLIB
+#define LV_USE_STDLIB_STRING  LV_STDLIB_CLIB
+#define LV_USE_STDLIB_SPRINTF LV_STDLIB_CLIB
 
 /*========= Monitor =========*/
 #define LV_USE_PERF_MONITOR 0
@@ -46,7 +52,7 @@
 #define LV_USE_BTNMATRIX 0
 #define LV_USE_CALENDAR 0
 #define LV_USE_CANVAS 0
-#define LV_USE_CHART 0
+#define LV_USE_CHART 1
 #define LV_USE_CHECKBOX 0
 #define LV_USE_DROPDOWN 0
 #define LV_USE_IMG 1

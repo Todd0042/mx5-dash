@@ -1,0 +1,17 @@
+<resources>
+    <style name="Theme.Mx5Dash" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/mx5_bg</item>
+        <item name="android:statusBarColor">@color/mx5_bg</item>
+        <item name="android:navigationBarColor">@color/mx5_bg</item>
+        <item name="colorPrimary">@color/mx5_accent</item>
+        <item name="colorPrimaryDark">@color/mx5_bg</item>
+        <item name="colorAccent">@color/mx5_accent</item>
+    </style>
+
+    <style name="Theme.Mx5Dash.Fullscreen" parent="Theme.Mx5Dash">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowTranslucentStatus">false</item>
+        <item name="android:windowTranslucentNavigation">false</item>
+    </style>
+</resources>
