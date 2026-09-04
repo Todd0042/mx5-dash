@@ -215,6 +215,21 @@ void BleElm::loop() {
                     initialized_ = true;
                     retryDelayMs_ = 2000;
                     Serial.println("[bleElm] adapter fully ready for live telemetry");
+
+                    // Auto-bond discovered adapter into NVS if none was previously saved
+                    if (strlen(pairedMac_) == 0 && targetDevice_) {
+                        strncpy(pairedMac_, targetDevice_->getAddress().toString().c_str(), sizeof(pairedMac_) - 1);
+                        pairedMac_[sizeof(pairedMac_) - 1] = '\0';
+                        std::string devName = targetDevice_->getName();
+                        if (!devName.empty()) {
+                            strncpy(pairedName_, devName.c_str(), sizeof(pairedName_) - 1);
+                            pairedName_[sizeof(pairedName_) - 1] = '\0';
+                        }
+                        UserPrefs::savePairedMac(pairedMac_);
+                        UserPrefs::savePairedName(pairedName_);
+                        Serial.printf("[bleElm] auto-bonded paired device: '%s' (%s) into NVS flash\n",
+                                      pairedName_, pairedMac_);
+                    }
                     return;
                 }
                 Serial.println("[bleElm] GATT/ELM init failed, retrying...");

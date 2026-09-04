@@ -3579,9 +3579,12 @@ void Mx5UI::onSettingsActionClick(lv_event_t* e) {
             ui->setScreen(SCREEN_WHEEL_MAP);
             break;
         case 118: // Initial Setup Wizard Screen
+            ui->obd_.freeze(true);
             ui->setScreen(SCREEN_WIZARD);
             break;
         case 119: // Wizard Finish -> Home Screen
+            UserPrefs::saveConfigured(true);
+            ui->obd_.freeze(false);
             ui->setScreen(SCREEN_SPEED);
             break;
         case 120: // Transmission Auto (6AT)
@@ -3593,6 +3596,9 @@ void Mx5UI::onSettingsActionClick(lv_event_t* e) {
             ui->transAuto_ = false;
             UserPrefs::saveTransAuto(false);
             ui->data_local_.isAutomatic = false;
+            break;
+        case 122: // Settings Screen from Wizard
+            ui->setScreen(SCREEN_SETTINGS);
             break;
     }
     ui->updateSettingsScreen();
@@ -3840,6 +3846,30 @@ void Mx5UI::updateBleConfigScreen() {
     if (blePairedRssiLbl_) {
         lv_label_set_text_fmt(blePairedRssiLbl_, "Signal: %d dBm • ISO 15765-4", obd_.getRssi());
     }
+
+    // Update real discovered BLE devices
+    uint8_t count = obd_.getDiscoveredDeviceCount();
+    for (uint8_t i = 0; i < 4; i++) {
+        BleDeviceInfo dev;
+        if (obd_.getDiscoveredDevice(i, dev)) {
+            if (bleDevNameLbl_[i]) {
+                lv_label_set_text(bleDevNameLbl_[i], dev.name);
+                lv_obj_set_style_text_color(bleDevNameLbl_[i], dev.isPaired ? C_ACCENT : C_TEXT, 0);
+            }
+            if (bleDevMacLbl_[i]) {
+                lv_label_set_text_fmt(bleDevMacLbl_[i], "%s • %ddBm", dev.mac, dev.rssi);
+            }
+            if (bleDevTagLbl_[i]) {
+                lv_label_set_text(bleDevTagLbl_[i], dev.isPaired ? "[PAIRED]" : (dev.isObdCandidate ? "[OBD]" : "[BLE]"));
+                lv_obj_set_style_text_color(bleDevTagLbl_[i], dev.isPaired ? C_OK : (dev.isObdCandidate ? C_ACCENT : C_DIM), 0);
+            }
+            if (bleDeviceSlot_[i]) {
+                lv_obj_set_style_bg_color(bleDeviceSlot_[i], dev.isPaired ? lv_color_hex(0x201214) : lv_color_hex(0x0E1013), 0);
+                lv_obj_set_style_border_color(bleDeviceSlot_[i], dev.isPaired ? C_ACCENT : C_PANEL_BRD, 0);
+                lv_obj_set_style_border_width(bleDeviceSlot_[i], dev.isPaired ? 2 : 1, 0);
+            }
+        }
+    }
 }
 
 void Mx5UI::onBleDeviceSelectClick(lv_event_t* e) {
@@ -3852,28 +3882,28 @@ void Mx5UI::onBleDeviceSelectClick(lv_event_t* e) {
         uint8_t slotIdx = (uint8_t)(action - 500);
         ui->selectedBleDevice_ = slotIdx;
 
-        const char* names[4] = {"vLinker MS 08449", "OBDLink CX BLE", "VEEPEAK OBD-II", "iCar Pro BLE4.0"};
-        const char* macs[4]  = {"64:8C:BB:1A:08:0A", "F0:B5:D1:22:90:4C", "B8:1F:5E:44:11:02", "DC:06:98:50:31:AA"};
+        BleDeviceInfo dev;
+        if (ui->obd_.getDiscoveredDevice(slotIdx, dev)) {
+            ui->obd_.pairDevice(dev.mac, dev.name);
 
-        ui->obd_.pairDevice(macs[slotIdx], names[slotIdx]);
-
-        for (uint8_t i = 0; i < 4; i++) {
-            if (ui->bleDeviceSlot_[i]) {
-                lv_obj_set_style_bg_color(ui->bleDeviceSlot_[i], (i == slotIdx) ? lv_color_hex(0x201214) : lv_color_hex(0x0E1013), 0);
-                lv_obj_set_style_border_color(ui->bleDeviceSlot_[i], (i == slotIdx) ? C_ACCENT : C_PANEL_BRD, 0);
-                lv_obj_set_style_border_width(ui->bleDeviceSlot_[i], (i == slotIdx) ? 2 : 1, 0);
+            for (uint8_t i = 0; i < 4; i++) {
+                if (ui->bleDeviceSlot_[i]) {
+                    lv_obj_set_style_bg_color(ui->bleDeviceSlot_[i], (i == slotIdx) ? lv_color_hex(0x201214) : lv_color_hex(0x0E1013), 0);
+                    lv_obj_set_style_border_color(ui->bleDeviceSlot_[i], (i == slotIdx) ? C_ACCENT : C_PANEL_BRD, 0);
+                    lv_obj_set_style_border_width(ui->bleDeviceSlot_[i], (i == slotIdx) ? 2 : 1, 0);
+                }
+                if (ui->bleDevNameLbl_[i]) {
+                    lv_obj_set_style_text_color(ui->bleDevNameLbl_[i], (i == slotIdx) ? C_ACCENT : C_TEXT, 0);
+                }
+                if (ui->bleDevTagLbl_[i]) {
+                    lv_label_set_text(ui->bleDevTagLbl_[i], (i == slotIdx) ? "[PAIRED]" : "[OBD]");
+                    lv_obj_set_style_text_color(ui->bleDevTagLbl_[i], (i == slotIdx) ? C_OK : C_DIM, 0);
+                }
             }
-            if (ui->bleDevNameLbl_[i]) {
-                lv_obj_set_style_text_color(ui->bleDevNameLbl_[i], (i == slotIdx) ? C_ACCENT : C_TEXT, 0);
+            if (ui->bleScanStatusLbl_) {
+                lv_label_set_text_fmt(ui->bleScanStatusLbl_, "Paired to %s!", dev.name);
+                lv_obj_set_style_text_color(ui->bleScanStatusLbl_, C_OK, 0);
             }
-            if (ui->bleDevTagLbl_[i]) {
-                lv_label_set_text(ui->bleDevTagLbl_[i], (i == slotIdx) ? "[PAIRED]" : "[OBD]");
-                lv_obj_set_style_text_color(ui->bleDevTagLbl_[i], (i == slotIdx) ? C_OK : C_DIM, 0);
-            }
-        }
-        if (ui->bleScanStatusLbl_) {
-            lv_label_set_text_fmt(ui->bleScanStatusLbl_, "Paired to %s!", names[slotIdx]);
-            lv_obj_set_style_text_color(ui->bleScanStatusLbl_, C_OK, 0);
         }
         ui->updateBleConfigScreen();
     }
@@ -3949,12 +3979,12 @@ lv_obj_t* Mx5UI::buildWizardScreen() {
     lv_obj_set_style_text_font(wTitle, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(wTitle, C_ACCENT, 0);
     lv_label_set_text(wTitle, "WELCOME TO MX-5 ND2 DIGITAL CLUSTER");
-    lv_obj_align(wTitle, LV_ALIGN_TOP_LEFT, 16, 12);
+    lv_obj_align(wTitle, LV_ALIGN_TOP_LEFT, 16, 10);
     lockNoScroll(wTitle);
 
     const char* steps[4] = {
-        "1. Verify OBD-II BLE Scanner Connection (vLinker MS 08449)",
-        "2. Choose Measurement Units (US Imperial MPH/°F vs Metric)",
+        "1. Verify OBD-II BLE Scanner Connection (vLinker MS / OBDLink)",
+        "2. Configure Transmission (Automatic 6AT vs Manual 6MT) & Units",
         "3. Calibrate TPMS Wheel Sensor ID Binding (DIDs 2A05-2A08)",
         "4. Auto-dimming & Continuous Incident Datalogger Ready"
     };
@@ -3963,7 +3993,7 @@ lv_obj_t* Mx5UI::buildWizardScreen() {
         lv_obj_set_style_text_font(sLbl, &lv_font_montserrat_10, 0);
         lv_obj_set_style_text_color(sLbl, C_TEXT, 0);
         lv_label_set_text(sLbl, steps[i]);
-        lv_obj_align(sLbl, LV_ALIGN_TOP_LEFT, 16, 42 + i * 26);
+        lv_obj_align(sLbl, LV_ALIGN_TOP_LEFT, 16, 38 + i * 25);
         lockNoScroll(sLbl);
     }
 
@@ -3990,9 +4020,10 @@ lv_obj_t* Mx5UI::buildWizardScreen() {
         return b;
     };
 
-    makeWizBtn(card, 16, 186, 132, 36, "BLUETOOTH SETUP", 116, lv_color_hex(0x191A20));
-    makeWizBtn(card, 158, 186, 132, 36, "CALIBRATE TPMS", 117, lv_color_hex(0x191A20));
-    makeWizBtn(card, 300, 186, 136, 36, "FINISH SETUP", 119, C_ACCENT);
+    makeWizBtn(card, 12, 186, 98, 36, "BT SETUP", 116, lv_color_hex(0x191A20));
+    makeWizBtn(card, 118, 186, 104, 36, "6AT / UNITS", 122, lv_color_hex(0x191A20));
+    makeWizBtn(card, 230, 186, 102, 36, "CAL TPMS", 117, lv_color_hex(0x191A20));
+    makeWizBtn(card, 340, 186, 100, 36, "FINISH", 119, C_ACCENT);
 
     return scr;
 }

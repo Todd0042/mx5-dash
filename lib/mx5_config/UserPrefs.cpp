@@ -20,8 +20,8 @@ static bool     sSpeedMask  = true;
 static bool     sTransAuto  = true; // Default to Automatic (6AT)
 static char     sBlePrefix[32] = MX5_BLE_DEVICE_PREFIX;
 static uint16_t sBleScanTimeout = 5000;
-static char     sPairedMac[20] = "64:8C:BB:1A:08:0A"; // default paired scanner MAC
-static char     sPairedName[32] = "vLinker MS 08449";
+static char     sPairedMac[20] = ""; // empty default -> auto-discovers live adapter
+static char     sPairedName[32] = "";
 
 // Setup / calibration state
 static bool sConfigured   = false;             // first boot => wizard

@@ -62,11 +62,13 @@ void setup() {
     obd.setBlePrefix(blePrefix);
     obd.setBleScanTimeout(UserPrefs::getBleScanTimeout());
     obd.start();
-    obd.freeze(true);   // keep the task alive but idle until config completes
 
     // First-time boot: run the 4-step setup wizard before the driving dashboard.
     if (!UserPrefs::isConfigured()) {
+        obd.freeze(true);   // hold PID polling while in initial setup wizard
         ui.runSetupWizard();
+    } else {
+        obd.freeze(false);  // live PID polling immediately on normal boot
     }
 
     Serial.println("[main] ready");
