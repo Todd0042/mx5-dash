@@ -302,8 +302,8 @@ class BluetoothSerialManager(
             val activeScreen = if (targetTransitionScreen >= 0) targetTransitionScreen else currentActiveScreen
             screenTick = (screenTick + 1) % 16
 
-            // Check 30-Second Safety Warning Sweep (TPMS + Critical Overheat)
-            if (nowMs - lastSafetySweepMs > 30000L && activeScreen != 1) { // 1 = SCREEN_TPMS
+            // Check 25-Second Safety Warning Sweep (TPMS + Critical Overheat + Ambient Temp)
+            if (nowMs - lastSafetySweepMs > 25000L && activeScreen != 1) { // 1 = SCREEN_TPMS
                 lastSafetySweepMs = nowMs
                 executeSafetySweep(output, input)
             } else {
@@ -329,9 +329,9 @@ class BluetoothSerialManager(
         tick: Int
     ) {
         when (screen) {
-            // Screen 0: Hero Speedometer -> RPM, Fuel %, Ambient Temp
+            // Screen 0: Hero Speedometer -> RPM, Fuel %
             0 -> {
-                when (tick % 3) {
+                when (tick % 2) {
                     0 -> {
                         val resp = sendObdCommand(output, input, "010C", 80)
                         val bytes = parseHexBytes(resp, "410C")
@@ -342,20 +342,9 @@ class BluetoothSerialManager(
                         val bytes = parseHexBytes(resp, "412F")
                         if (bytes.isNotEmpty()) liveFuelLevelPct = (bytes[0] * 100) / 255
                     }
-                    2 -> {
-                        // Ambient Air Temp with strict sanity checking (-40°C to +55°C)
-                        val resp = sendObdCommand(output, input, "0146", 80)
-                        val bytes = parseHexBytes(resp, "4146")
-                        if (bytes.isNotEmpty()) {
-                            val temp = bytes[0] - 40
-                            if (temp in -40..55) {
-                                liveAmbientC = temp
-                            }
-                        }
-                    }
                 }
             }
-            // Screen 1: TPMS -> 4-Corner Pressure & Temp via BCM (Header 720)
+            // Screen 1: TPMS -> 4-Corner Pressure & Temp + Ambient Air Temp via BCM (Header 720)
             1 -> {
                 sendObdCommand(output, input, "ATSH 720", 90)
                 val p0 = parseHexBytes(sendObdCommand(output, input, "222A05", 90), "622A05")
@@ -381,6 +370,16 @@ class BluetoothSerialManager(
                     rrPsi = ((p3[0] * 1373f) / 1000f) * 0.145038f
                     if (p3.size >= 2) rrTemp = (p3[1] - 40).toFloat()
                 }
+
+                val ambResp = sendObdCommand(output, input, "220146", 90)
+                val ambBytes = parseHexBytes(ambResp, "620146")
+                if (ambBytes.isNotEmpty()) {
+                    val temp = ambBytes[0] - 40
+                    if (temp in -40..55) {
+                        liveAmbientC = temp
+                    }
+                }
+
                 sendObdCommand(output, input, "ATSH 7E0", 90)
             }
             // Screen 2: Engine Tachometer -> High-rate RPM, Load %, Throttle %, Battery Volts
@@ -492,19 +491,41 @@ class BluetoothSerialManager(
     }
 
     private fun executeSafetySweep(output: OutputStream, input: java.io.InputStream) {
-        // Query TPMS on BCM
+        // Query TPMS and Ambient Air Temp on BCM (Header 720)
         sendObdCommand(output, input, "ATSH 720", 90)
         val p0 = parseHexBytes(sendObdCommand(output, input, "222A05", 90), "622A05")
-        if (p0.isNotEmpty()) flPsi = ((p0[0] * 1373f) / 1000f) * 0.145038f
+        if (p0.isNotEmpty()) {
+            flPsi = ((p0[0] * 1373f) / 1000f) * 0.145038f
+            if (p0.size >= 2) flTemp = (p0[1] - 40).toFloat()
+        }
 
         val p1 = parseHexBytes(sendObdCommand(output, input, "222A06", 90), "622A06")
-        if (p1.isNotEmpty()) frPsi = ((p1[0] * 1373f) / 1000f) * 0.145038f
+        if (p1.isNotEmpty()) {
+            frPsi = ((p1[0] * 1373f) / 1000f) * 0.145038f
+            if (p1.size >= 2) frTemp = (p1[1] - 40).toFloat()
+        }
 
         val p2 = parseHexBytes(sendObdCommand(output, input, "222A07", 90), "622A07")
-        if (p2.isNotEmpty()) rlPsi = ((p2[0] * 1373f) / 1000f) * 0.145038f
+        if (p2.isNotEmpty()) {
+            rlPsi = ((p2[0] * 1373f) / 1000f) * 0.145038f
+            if (p2.size >= 2) rlTemp = (p2[1] - 40).toFloat()
+        }
 
         val p3 = parseHexBytes(sendObdCommand(output, input, "222A08", 90), "622A08")
-        if (p3.isNotEmpty()) rrPsi = ((p3[0] * 1373f) / 1000f) * 0.145038f
+        if (p3.isNotEmpty()) {
+            rrPsi = ((p3[0] * 1373f) / 1000f) * 0.145038f
+            if (p3.size >= 2) rrTemp = (p3[1] - 40).toFloat()
+        }
+
+        // Ambient Air Temp (DID 220146 on Header 720)
+        val ambResp = sendObdCommand(output, input, "220146", 90)
+        val ambBytes = parseHexBytes(ambResp, "620146")
+        if (ambBytes.isNotEmpty()) {
+            val temp = ambBytes[0] - 40
+            if (temp in -40..55) {
+                liveAmbientC = temp
+            }
+        }
 
         // Restore PCM
         sendObdCommand(output, input, "ATSH 7E0", 90)

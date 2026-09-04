@@ -59,17 +59,19 @@ graph TD
         B2 --> B3[222A06: FR TPMS]
         B3 --> B4[222A07: RL TPMS]
         B4 --> B5[222A08: RR TPMS]
-        B5 --> B6[222A26: Fuel Level %]
-        B6 --> B7[ATSH 7E0 Restore]
+        B5 --> B6[220146: Ambient Air Temp]
+        B6 --> B7[222A26: Fuel Level %]
+        B7 --> B8[ATSH 7E0 Restore]
     end
 ```
 
-### Staggered BCM Query Routine (Every 25–30 Seconds):
+### Staggered BCM Query Routine (Every 25 Seconds):
 1. Send `ATSH 720` (Switch header to Instrument Cluster / BCM).
 2. Query `222A05` (Front Left TPMS), `222A06` (Front Right TPMS), `222A07` (Rear Left TPMS), `222A08` (Rear Right TPMS).
-3. Query `222A26` (Fuel Tank Level).
-4. Send `ATSH 7E0` (Restore Engine PCM header immediately).
-5. Resume fast Tier 1/Tier 2 speed interleaved cycle.
+3. Query `220146` (True Bumper Ambient Air Temp).
+4. Query `222A26` (Fuel Tank Level).
+5. Send `ATSH 7E0` (Restore Engine PCM header immediately).
+6. Resume fast Tier 1/Tier 2 speed interleaved cycle.
 
 ---
 

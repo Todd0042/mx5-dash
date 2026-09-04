@@ -23,9 +23,9 @@
  *   fuel       012F    byte %          1200 ms
  *   intake air 010F    byte - 40       1200 ms
  *   battery    0142    byte * 0.1 V    1200 ms
- *   ambient    0146    byte - 40       1200 ms
+ *   ambient    220146  byte - 40 (BCM 720) 25000 ms
  *   oil temp   221310  (best effort)   3000 ms
- *   TPMS       222Axx  manufacturer DIDs, MS-CAN, see Config.h
+ *   TPMS       222Axx  manufacturer DIDs, MS-CAN (BCM 720), see Config.h
  */
 class ObdService : public ObdSource {
 public:

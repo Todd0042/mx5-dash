@@ -107,7 +107,7 @@ Standard ELM327 adapters operate in half-duplex, which normally limits polling t
 This project solves latency using an **interleaved transaction scheduler**:
 - **Speed (`010D`)** is queried on **every alternate transaction**, maintaining a silky smooth **~40 Hz speed refresh rate**.
 - Secondary metrics (RPM, Throttle, Coolant, Load, Oil Temp) cycle on the in-between ticks with the Engine PCM (`Header 7E0`).
-- Every 25–30 seconds, the engine briefly sends `ATSH 720` to query the **Body Control Module (BCM / Instrument Cluster)** for all 4 tire pressures/temperatures (`222A05`..`08`) and fuel tank level % (`222A26`), then seamlessly restores `ATSH 7E0`.
+- Every 25 seconds, the engine briefly sends `ATSH 720` to query the **Body Control Module (BCM / Instrument Cluster)** for all 4 tire pressures/temperatures (`222A05`..`08`), bumper ambient air temperature (`220146`), and fuel tank level % (`222A26`), then seamlessly restores `ATSH 7E0`.
 
 ---
 

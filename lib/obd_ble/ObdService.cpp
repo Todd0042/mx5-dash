@@ -297,9 +297,10 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
     uint8_t screen = i.activeScreen_;
     i.slowIdx = (i.slowIdx + 1) % 16;
 
-    // 2. 30-Second Safety Sweep (TPMS + Overheat alarms when not on Screen 1)
-    if (now - i.lastSafetySweepMs > 30000 && screen != 1) {
+    // 2. 25-Second Safety Sweep (TPMS + Critical Overheat + Ambient Temp when not on Screen 1)
+    if (now - i.lastSafetySweepMs > 25000 && screen != 1) {
         i.lastSafetySweepMs = now;
+        pollTpms(i, now);
         if (readUint8(i, "0105", "05", b)) {
             portENTER_CRITICAL(&i.mux);
             i.data.coolantC = b > 40 ? b - 40 : 0;
@@ -317,9 +318,9 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
     } else {
         // 3. View-Driven Command Queue based on active screen
         switch (screen) {
-            // Screen 0: Hero Speedometer -> RPM, Fuel %, Ambient Temp
+            // Screen 0: Hero Speedometer -> RPM, Fuel %
             case 0:
-                switch (i.slowIdx % 3) {
+                switch (i.slowIdx % 2) {
                     case 0:
                         if (readUint16(i, "010C", "0C", tmp)) {
                             portENTER_CRITICAL(&i.mux);
@@ -332,16 +333,6 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                             portENTER_CRITICAL(&i.mux);
                             i.data.fuelLevelPct = (uint8_t)(((uint16_t)b * 100) / 255);
                             portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                    case 2:
-                        if (readUint8(i, "0146", "46", b)) {
-                            int16_t temp = (int16_t)b - 40;
-                            if (temp >= -40 && temp <= 55) {
-                                portENTER_CRITICAL(&i.mux);
-                                i.data.ambientC = (uint8_t)(temp > 0 ? temp : 0);
-                                portEXIT_CRITICAL(&i.mux);
-                            }
                         }
                         break;
                 }
@@ -613,6 +604,19 @@ void ObdService::pollTpms(Impl& i, uint32_t now) {
                 i.data.tirePressure[k] = psi / 14.5038f;
                 i.data.tireTemp[k] = (float)ob[1] - 40.0f;
                 i.data.tireKnown[k] = true;
+                portEXIT_CRITICAL(&i.mux);
+            }
+        }
+    }
+
+    // Query Ambient Air Temp DID 220146 while on Header 720
+    if (i.elm.sendQuery("220146", resp, sizeof(resp), 250)) {
+        uint8_t ob[1];
+        if (parseMode22Bytes(resp, "0146", ob, 1)) {
+            int16_t temp = (int16_t)ob[0] - 40;
+            if (temp >= -40 && temp <= 55) {
+                portENTER_CRITICAL(&i.mux);
+                i.data.ambientC = (uint8_t)(temp > 0 ? temp : 0);
                 portEXIT_CRITICAL(&i.mux);
             }
         }
