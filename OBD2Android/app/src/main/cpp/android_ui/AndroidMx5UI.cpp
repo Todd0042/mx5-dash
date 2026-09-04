@@ -174,7 +174,17 @@ void AndroidMx5UI::setScreen(uint8_t index) {
 }
 
 void AndroidMx5UI::nextScreen() {
-    if (currentScreen_ == SCREEN_MENU || currentScreen_ >= CONTENT_SCREEN_COUNT) {
+    if (currentScreen_ == SCREEN_MENU) {
+        setScreen(lastContentScreen_);
+        return;
+    }
+    if (currentScreen_ >= SCREEN_DIAG_SUB_FUEL && currentScreen_ <= SCREEN_DIAG_SUB_LOGS) {
+        // Cycle forward among the 5 diagnostic sub-screens: 8 -> 9 -> 10 -> 11 -> 12 -> 8
+        uint8_t nextSub = SCREEN_DIAG_SUB_FUEL + ((currentScreen_ - SCREEN_DIAG_SUB_FUEL + 1) % 5);
+        setScreen(nextSub);
+        return;
+    }
+    if (currentScreen_ >= CONTENT_SCREEN_COUNT) {
         setScreen(0);
         return;
     }
@@ -182,7 +192,17 @@ void AndroidMx5UI::nextScreen() {
 }
 
 void AndroidMx5UI::prevScreen() {
-    if (currentScreen_ == SCREEN_MENU || currentScreen_ >= CONTENT_SCREEN_COUNT) {
+    if (currentScreen_ == SCREEN_MENU) {
+        setScreen(lastContentScreen_);
+        return;
+    }
+    if (currentScreen_ >= SCREEN_DIAG_SUB_FUEL && currentScreen_ <= SCREEN_DIAG_SUB_LOGS) {
+        // Cycle backward among the 5 diagnostic sub-screens: 8 <- 9 <- 10 <- 11 <- 12 <- 8
+        uint8_t prevSub = SCREEN_DIAG_SUB_FUEL + ((currentScreen_ - SCREEN_DIAG_SUB_FUEL + 4) % 5);
+        setScreen(prevSub);
+        return;
+    }
+    if (currentScreen_ >= CONTENT_SCREEN_COUNT) {
         setScreen(0);
         return;
     }
@@ -192,6 +212,10 @@ void AndroidMx5UI::prevScreen() {
 void AndroidMx5UI::toggleMenu() {
     if (currentScreen_ == SCREEN_MENU) {
         setScreen(lastContentScreen_);
+    } else if (currentScreen_ >= SCREEN_DIAG_SUB_FUEL && currentScreen_ <= SCREEN_DIAG_SUB_LOGS) {
+        setScreen(SCREEN_DIAG);
+    } else if (currentScreen_ >= SCREEN_BLE_CONFIG && currentScreen_ <= SCREEN_WHEEL_MAP) {
+        setScreen(SCREEN_SETTINGS);
     } else {
         lastContentScreen_ = currentScreen_;
         setScreen(SCREEN_MENU);
@@ -235,7 +259,8 @@ lv_obj_t* AndroidMx5UI::addSubScreenHeader(lv_obj_t* parent, const char* title, 
     lv_obj_set_style_radius(backBtn, 8, 0);
     lv_obj_set_style_border_color(backBtn, C_ACCENT, 0);
     lv_obj_set_style_border_width(backBtn, 1, 0);
-    lv_obj_set_user_data(backBtn, (void*)(uintptr_t)subScreenIndex);
+    uint8_t backTarget = (subScreenIndex >= SCREEN_BLE_CONFIG && subScreenIndex <= SCREEN_WHEEL_MAP) ? SCREEN_SETTINGS : SCREEN_DIAG;
+    lv_obj_set_user_data(backBtn, (void*)(uintptr_t)backTarget);
     lv_obj_add_event_cb(backBtn, onSubScreenNavClick, LV_EVENT_CLICKED, this);
     lockNoScroll(backBtn);
 

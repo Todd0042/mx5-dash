@@ -310,9 +310,9 @@ void Mx5UI::nextScreen() {
         setScreen(lastContentScreen_);
         return;
     }
-    if (currentScreen_ >= 8 && currentScreen_ <= 11) {
-        // Cycle forward among the 4 diagnostic sub-screens: 8 -> 9 -> 10 -> 11 -> 8
-        uint8_t nextSub = 8 + ((currentScreen_ - 8 + 1) % 4);
+    if (currentScreen_ >= SCREEN_DIAG_SUB_FUEL && currentScreen_ <= SCREEN_DIAG_SUB_LOGS) {
+        // Cycle forward among the 5 diagnostic sub-screens: 8 -> 9 -> 10 -> 11 -> 12 -> 8
+        uint8_t nextSub = SCREEN_DIAG_SUB_FUEL + ((currentScreen_ - SCREEN_DIAG_SUB_FUEL + 1) % 5);
         setScreenWithTransition(nextSub, true);
         return;
     }
@@ -325,9 +325,9 @@ void Mx5UI::prevScreen() {
         setScreen(lastContentScreen_);
         return;
     }
-    if (currentScreen_ >= 8 && currentScreen_ <= 11) {
-        // Cycle backward among the 4 diagnostic sub-screens: 8 <- 9 <- 10 <- 11 <- 8
-        uint8_t prevSub = 8 + ((currentScreen_ - 8 + 3) % 4);
+    if (currentScreen_ >= SCREEN_DIAG_SUB_FUEL && currentScreen_ <= SCREEN_DIAG_SUB_LOGS) {
+        // Cycle backward among the 5 diagnostic sub-screens: 8 <- 9 <- 10 <- 11 <- 12 <- 8
+        uint8_t prevSub = SCREEN_DIAG_SUB_FUEL + ((currentScreen_ - SCREEN_DIAG_SUB_FUEL + 4) % 5);
         setScreenWithTransition(prevSub, false);
         return;
     }
@@ -338,7 +338,12 @@ void Mx5UI::prevScreen() {
 void Mx5UI::toggleMenu() {
     if (currentScreen_ == SCREEN_MENU) {
         setScreen(lastContentScreen_);
+    } else if (currentScreen_ >= SCREEN_DIAG_SUB_FUEL && currentScreen_ <= SCREEN_DIAG_SUB_LOGS) {
+        setScreen(SCREEN_DIAG);
+    } else if (currentScreen_ >= SCREEN_BLE_CONFIG && currentScreen_ <= SCREEN_WHEEL_MAP) {
+        setScreen(SCREEN_SETTINGS);
     } else {
+        lastContentScreen_ = currentScreen_;
         setScreen(SCREEN_MENU);
     }
 }

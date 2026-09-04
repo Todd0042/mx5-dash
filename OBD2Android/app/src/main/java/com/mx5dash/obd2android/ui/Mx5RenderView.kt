@@ -27,7 +27,7 @@ class Mx5RenderView @JvmOverloads constructor(
     companion object {
         const val LOGICAL_W = 800
         const val LOGICAL_H = 360
-        private const val CONTENT_SCREEN_COUNT = 6 // Screens 0..5
+        private const val CONTENT_SCREEN_COUNT = 7 // Screens 0..6
         private const val SLIDE_DURATION_MS = 200L
         private const val MAX_HOLD_TIMEOUT_MS = 750L
     }
@@ -59,14 +59,14 @@ class Mx5RenderView @JvmOverloads constructor(
     private val inverseMatrix = Matrix()
     private val touchPts = FloatArray(2)
 
-    // Transition State
+    // Transition State Machine
     @Volatile private var transitionPhase = TransitionPhase.IDLE
     private var transitionDirection = Direction.LEFT
     private var targetScreenIndex = 0
     private var phaseStartTimeMs = 0L
     private var holdStartTimeMs = 0L
 
-    // Touch gesture tracking
+    // Touch Handling State
     private var downLogicalX = 0f
     private var downLogicalY = 0f
     private var downTimeMs = 0L
@@ -133,19 +133,18 @@ class Mx5RenderView @JvmOverloads constructor(
         letterSpacing = 0.08f
     }
     private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(245, 158, 11)
+        color = Color.rgb(220, 30, 45) // Mazda Red Dot
         style = Paint.Style.FILL
     }
 
     private var carLeftBitmap: Bitmap? = null
     private var carRightBitmap: Bitmap? = null
 
-    private val app get() = context.applicationContext as? Mx5Application
+    private val app: Mx5Application?
+        get() = context.applicationContext as? Mx5Application
 
     init {
         holder.addCallback(this)
-        isFocusable = true
-
         try {
             context.assets.open("mx5_rf_side_left.png").use { stream ->
                 carLeftBitmap = android.graphics.BitmapFactory.decodeStream(stream)
@@ -168,6 +167,16 @@ class Mx5RenderView @JvmOverloads constructor(
                 val updated = NativeBridge.nativeRender(argbBuffer, argbBuffer.size)
                 if (updated) {
                     mainBitmap.setPixels(argbBuffer, 0, LOGICAL_W, 0, 0, LOGICAL_W, LOGICAL_H)
+                }
+
+                // Sync background OBD polling screen if idle
+                if (transitionPhase == TransitionPhase.IDLE) {
+                    val currentNative = NativeBridge.nativeGetCurrentScreen()
+                    app?.bluetoothManager?.let { bm ->
+                        if (bm.currentActiveScreen != currentNative) {
+                            bm.currentActiveScreen = currentNative
+                        }
+                    }
                 }
 
                 val canvas = holder.lockCanvas()
@@ -426,6 +435,15 @@ class Mx5RenderView @JvmOverloads constructor(
             4 -> "TRACK & DYNAMICS"
             5 -> "FUEL & TRIP ECONOMY"
             6 -> "DIAGNOSTIC HUB"
+            8 -> "FUEL TRIMS & HPFP"
+            9 -> "CYLINDERS & MISFIRE"
+            10 -> "CHASSIS DYNAMICS & G-FORCE"
+            11 -> "I/M SMOG READINESS"
+            12 -> "DATA LOGS & BLACK BOX"
+            13 -> "SYSTEM SETTINGS"
+            14 -> "BLE CONNECTION"
+            15 -> "SETUP WIZARD"
+            16 -> "WHEEL CALIBRATION"
             else -> "TELEMETRY DASHBOARD"
         }
     }
@@ -479,7 +497,16 @@ class Mx5RenderView @JvmOverloads constructor(
                         NativeBridge.nativeTouch(1, logicalX.toInt(), logicalY.toInt())
 
                         val currentScreen = NativeBridge.nativeGetCurrentScreen()
-                        if (currentScreen < CONTENT_SCREEN_COUNT) {
+                        if (currentScreen in 8..12) {
+                            // Diagnostic Sub-Screens cycle among themselves (8..12)
+                            if (dx < 0) {
+                                val nextSub = 8 + ((currentScreen - 8 + 1) % 5)
+                                startDirectionalTransition(nextSub, Direction.LEFT)
+                            } else {
+                                val prevSub = 8 + ((currentScreen - 8 + 4) % 5)
+                                startDirectionalTransition(prevSub, Direction.RIGHT)
+                            }
+                        } else if (currentScreen < CONTENT_SCREEN_COUNT) {
                             if (dx < 0) {
                                 // Swipe Left -> Next Screen (Car enters from right, moves left)
                                 val next = (currentScreen + 1) % CONTENT_SCREEN_COUNT
@@ -491,10 +518,16 @@ class Mx5RenderView @JvmOverloads constructor(
                             }
                         }
                     } else if (Math.abs(dy) > 55f && Math.abs(dy) > Math.abs(dx) * 1.25f) {
-                        // Vertical swipe -> Menu Toggle
+                        // Vertical swipe
                         isSwipeHandled = true
                         NativeBridge.nativeTouch(1, logicalX.toInt(), logicalY.toInt())
-                        NativeBridge.nativeToggleMenu()
+                        val currentScreen = NativeBridge.nativeGetCurrentScreen()
+                        if (currentScreen in 8..12) {
+                            // Exit sub-screen back to Diagnostic Hub (6)
+                            startDirectionalTransition(6, if (dy < 0) Direction.LEFT else Direction.RIGHT)
+                        } else {
+                            NativeBridge.nativeToggleMenu()
+                        }
                     } else {
                         NativeBridge.nativeTouch(0, logicalX.toInt(), logicalY.toInt())
                     }
