@@ -957,7 +957,7 @@ lv_obj_t* Mx5UI::buildTrackScreen() {
     trackBestLbl_ = lv_label_create(timerCard);
     lv_obj_set_style_text_font(trackBestLbl_, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(trackBestLbl_, C_DIM, 0);
-    lv_label_set_text(trackBestLbl_, "BEST: 5.70 s");
+    lv_label_set_text(trackBestLbl_, "BEST: -- s");
     lv_obj_align(trackBestLbl_, LV_ALIGN_BOTTOM_MID, 0, -12);
     lockNoScroll(trackBestLbl_);
 
@@ -1203,7 +1203,7 @@ lv_obj_t* Mx5UI::buildDiagnosticsScreen() {
     diagBattery_ = lv_label_create(card);
     setTextFont(diagBattery_);
     lv_obj_set_style_text_color(diagBattery_, C_DIM, 0);
-    lv_label_set_text_fmt(diagBattery_, "Battery: 14.2 V");
+    lv_label_set_text(diagBattery_, "Battery: -- V");
     lv_obj_align(diagBattery_, LV_ALIGN_TOP_RIGHT, -16, 10);
     lockNoScroll(diagBattery_);
 
@@ -1610,9 +1610,14 @@ void Mx5UI::updateSpeedScreen() {
         updateDottedValue(fuelSeg_, data_local_.fuelLevelPct / 100.0f);
         lv_label_set_text_fmt(fuelSeg_.val, "%d%%", data_local_.fuelLevelPct);
 
-        updateDottedValue(ambientSeg_, (float)data_local_.ambientC / 50.0f);
-        lv_label_set_text_fmt(ambientSeg_.val, "%d %s", tempU(data_local_.ambientC),
-                              MX5_UNITS_US ? "°F" : "°C");
+        if (data_local_.ambientC == 0) {
+            updateDottedValue(ambientSeg_, 0.0f);
+            lv_label_set_text(ambientSeg_.val, "--");
+        } else {
+            updateDottedValue(ambientSeg_, (float)data_local_.ambientC / 50.0f);
+            lv_label_set_text_fmt(ambientSeg_.val, "%d %s", tempU(data_local_.ambientC),
+                                  MX5_UNITS_US ? "°F" : "°C");
+        }
     }
 }
 
@@ -1652,44 +1657,77 @@ void Mx5UI::updateRpmScreen() {
     lv_label_set_text_fmt(throttleSeg_.val, "%d%%", data_local_.throttlePct);
 
     updateDottedValue(fuelArcSeg_, data_local_.fuelLevelPct / 100.0f);
-    lv_label_set_text_fmt(fuelArcSeg_.val, "%d%%", data_local_.fuelLevelPct);
+    if (data_local_.fuelLevelPct == 0) {
+        lv_label_set_text(fuelArcSeg_.val, "--%");
+    } else {
+        lv_label_set_text_fmt(fuelArcSeg_.val, "%d%%", data_local_.fuelLevelPct);
+    }
 
-    float batFrac = (data_local_.batteryVolts - 10.0f) / 5.0f; // 10V..15V
-    updateDottedValue(batArcSeg_, batFrac);
-    lv_label_set_text_fmt(batArcSeg_.val, "%.1f V", data_local_.batteryVolts);
+    if (data_local_.batteryVolts < 1.0f) {
+        updateDottedValue(batArcSeg_, 0.0f);
+        lv_label_set_text(batArcSeg_.val, "-- V");
+    } else {
+        float batFrac = (data_local_.batteryVolts - 10.0f) / 5.0f; // 10V..15V
+        updateDottedValue(batArcSeg_, batFrac);
+        lv_label_set_text_fmt(batArcSeg_.val, "%.1f V", data_local_.batteryVolts);
+    }
 }
 
 void Mx5UI::updateEngineScreen() {
-    // Coolant (0..120°C -> 0..1)
-    float coolFrac = (float)data_local_.coolantC / 120.0f;
-    updateDottedValue(coolantSeg_, coolFrac);
-    if (data_local_.coolantC > 105) warnTopDots(coolantSeg_);
-    lv_label_set_text_fmt(coolantSeg_.val, "%d %s", tempU(data_local_.coolantC),
-                          MX5_UNITS_US ? "°F" : "°C");
+    if (data_local_.coolantC == 0) {
+        updateDottedValue(coolantSeg_, 0.0f);
+        lv_label_set_text(coolantSeg_.val, "--");
+    } else {
+        // Coolant (0..120°C -> 0..1)
+        float coolFrac = (float)data_local_.coolantC / 120.0f;
+        updateDottedValue(coolantSeg_, coolFrac);
+        if (data_local_.coolantC > 105) warnTopDots(coolantSeg_);
+        lv_label_set_text_fmt(coolantSeg_.val, "%d %s", tempU(data_local_.coolantC),
+                              MX5_UNITS_US ? "°F" : "°C");
+    }
 
-    // Oil Temp (0..150°C -> 0..1)
-    float oilFrac = (float)data_local_.oilTempC / 150.0f;
-    updateDottedValue(oilSeg_, oilFrac);
-    if (data_local_.oilTempC > 130) warnTopDots(oilSeg_);
-    lv_label_set_text_fmt(oilSeg_.val, "%d %s", tempU(data_local_.oilTempC),
-                          MX5_UNITS_US ? "°F" : "°C");
+    if (data_local_.oilTempC == 0) {
+        updateDottedValue(oilSeg_, 0.0f);
+        lv_label_set_text(oilSeg_.val, "--");
+    } else {
+        // Oil Temp (0..150°C -> 0..1)
+        float oilFrac = (float)data_local_.oilTempC / 150.0f;
+        updateDottedValue(oilSeg_, oilFrac);
+        if (data_local_.oilTempC > 130) warnTopDots(oilSeg_);
+        lv_label_set_text_fmt(oilSeg_.val, "%d %s", tempU(data_local_.oilTempC),
+                              MX5_UNITS_US ? "°F" : "°C");
+    }
 
-    // Intake Air (0..60°C -> 0..1)
-    float intakeFrac = (float)data_local_.intakeAirC / 60.0f;
-    updateDottedValue(intakeSeg_, intakeFrac);
-    lv_label_set_text_fmt(intakeSeg_.val, "%d %s", tempU(data_local_.intakeAirC),
-                          MX5_UNITS_US ? "°F" : "°C");
+    if (data_local_.intakeAirC == 0) {
+        updateDottedValue(intakeSeg_, 0.0f);
+        lv_label_set_text(intakeSeg_.val, "--");
+    } else {
+        // Intake Air (0..60°C -> 0..1)
+        float intakeFrac = (float)data_local_.intakeAirC / 60.0f;
+        updateDottedValue(intakeSeg_, intakeFrac);
+        lv_label_set_text_fmt(intakeSeg_.val, "%d %s", tempU(data_local_.intakeAirC),
+                              MX5_UNITS_US ? "°F" : "°C");
+    }
 
-    // Battery Voltage (10V..15V -> 0..1)
-    float batFrac = (data_local_.batteryVolts - 10.0f) / 5.0f;
-    updateDottedValue(batterySeg_, batFrac);
-    lv_label_set_text_fmt(batterySeg_.val, "%.1f V", data_local_.batteryVolts);
+    if (data_local_.batteryVolts < 1.0f) {
+        updateDottedValue(batterySeg_, 0.0f);
+        lv_label_set_text(batterySeg_.val, "-- V");
+    } else {
+        // Battery Voltage (10V..15V -> 0..1)
+        float batFrac = (data_local_.batteryVolts - 10.0f) / 5.0f;
+        updateDottedValue(batterySeg_, batFrac);
+        lv_label_set_text_fmt(batterySeg_.val, "%.1f V", data_local_.batteryVolts);
+    }
 }
 
 void Mx5UI::updateTrackScreen() {
     // Update 0-60 timer readout & badge
     lv_label_set_text_fmt(trackTimerLbl_, "%.2f s", data_local_.accel0to60TimeSec);
-    lv_label_set_text_fmt(trackBestLbl_, "BEST: %.2f s", data_local_.best0to60TimeSec);
+    if (data_local_.best0to60TimeSec <= 0.01f) {
+        lv_label_set_text(trackBestLbl_, "BEST: -- s");
+    } else {
+        lv_label_set_text_fmt(trackBestLbl_, "BEST: %.2f s", data_local_.best0to60TimeSec);
+    }
 
     // HP & Torque live dials
     updateDottedValue(hpSeg_, (float)data_local_.estHorsepower / 200.0f);
@@ -1711,10 +1749,26 @@ void Mx5UI::updateTripScreen() {
     updateDottedValue(instantMpgSeg_, data_local_.instantMpg / 60.0f);
     lv_label_set_text_fmt(instantMpgSeg_.val, "%.1f", data_local_.instantMpg);
 
-    lv_label_set_text_fmt(tripAvgVal_, "%.1f", data_local_.tripAvgMpg);
-    lv_label_set_text_fmt(tripRangeVal_, "%d", data_local_.rangeMiles);
-    lv_label_set_text_fmt(tripDistVal_, "%.1f", data_local_.tripDistanceMiles);
-    lv_label_set_text_fmt(tripFuelVal_, "%d%%", data_local_.fuelLevelPct);
+    if (data_local_.tripAvgMpg <= 0.01f) {
+        lv_label_set_text(tripAvgVal_, "--");
+    } else {
+        lv_label_set_text_fmt(tripAvgVal_, "%.1f", data_local_.tripAvgMpg);
+    }
+    if (data_local_.rangeMiles == 0) {
+        lv_label_set_text(tripRangeVal_, "--");
+    } else {
+        lv_label_set_text_fmt(tripRangeVal_, "%d", data_local_.rangeMiles);
+    }
+    if (data_local_.tripDistanceMiles <= 0.01f) {
+        lv_label_set_text(tripDistVal_, "--");
+    } else {
+        lv_label_set_text_fmt(tripDistVal_, "%.1f", data_local_.tripDistanceMiles);
+    }
+    if (data_local_.fuelLevelPct == 0) {
+        lv_label_set_text(tripFuelVal_, "--%");
+    } else {
+        lv_label_set_text_fmt(tripFuelVal_, "%d%%", data_local_.fuelLevelPct);
+    }
 }
 
 void Mx5UI::updateTpmsScreen() {
@@ -2135,7 +2189,7 @@ lv_obj_t* Mx5UI::buildDiagSubFuel() {
     diagHpfpVal_ = lv_label_create(hpfpCard);
     lv_obj_set_style_text_font(diagHpfpVal_, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(diagHpfpVal_, C_SPEED, 0);
-    lv_label_set_text(diagHpfpVal_, "1,850 PSI");
+    lv_label_set_text(diagHpfpVal_, "-- PSI");
     lv_obj_align(diagHpfpVal_, LV_ALIGN_LEFT_MID, 14, 0);
     lockNoScroll(diagHpfpVal_);
 
@@ -2168,7 +2222,7 @@ lv_obj_t* Mx5UI::buildDiagSubFuel() {
     diagEvapVal_ = lv_label_create(evapCard);
     lv_obj_set_style_text_font(diagEvapVal_, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(diagEvapVal_, C_SPEED, 0);
-    lv_label_set_text(diagEvapVal_, "+12 Pa");
+    lv_label_set_text(diagEvapVal_, "-- Pa");
     lv_obj_align(diagEvapVal_, LV_ALIGN_LEFT_MID, 14, 0);
     lockNoScroll(diagEvapVal_);
 
@@ -2194,13 +2248,25 @@ void Mx5UI::updateDiagSubFuel() {
     lv_label_set_text_fmt(ltftSeg_.val, "%+.1f%%", data_local_.longTermFuelTrimPct);
 
     // AFR
-    lv_label_set_text_fmt(diagAfrVal_, "%.1f : 1", data_local_.airFuelRatio);
+    if (data_local_.airFuelRatio <= 0.01f) {
+        lv_label_set_text(diagAfrVal_, "-- : 1");
+    } else {
+        lv_label_set_text_fmt(diagAfrVal_, "%.1f : 1", data_local_.airFuelRatio);
+    }
 
     // HPFP Rail Pressure
-    lv_label_set_text_fmt(diagHpfpVal_, "%d PSI", data_local_.fuelRailPressurePsi);
+    if (data_local_.fuelRailPressurePsi == 0) {
+        lv_label_set_text(diagHpfpVal_, "0 PSI");
+    } else {
+        lv_label_set_text_fmt(diagHpfpVal_, "%d PSI", data_local_.fuelRailPressurePsi);
+    }
 
     // EVAP
-    lv_label_set_text_fmt(diagEvapVal_, "%+d Pa", data_local_.evapVaporPa);
+    if (data_local_.evapVaporPa == 0) {
+        lv_label_set_text(diagEvapVal_, "-- Pa");
+    } else {
+        lv_label_set_text_fmt(diagEvapVal_, "%+d Pa", data_local_.evapVaporPa);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -76,14 +76,14 @@ class BluetoothSerialManager(
     // Retained Live Vehicle State (Freeze-Protected: Never reset on dropped packets)
     private var liveRpm = 0
     private var liveSpeedKmh = 0
-    private var liveCoolantC = 88
-    private var liveOilTempC = 92
-    private var liveIntakeC = 24
-    private var liveAmbientC = 22
-    private var liveBatVolts = 14.2f
+    private var liveCoolantC = 0
+    private var liveOilTempC = 0
+    private var liveIntakeC = 0
+    private var liveAmbientC = 0
+    private var liveBatVolts = 0.0f
     private var liveEngineLoadPct = 0
     private var liveThrottlePct = 0
-    private var liveFuelLevelPct = 50
+    private var liveFuelLevelPct = 0
     private var liveGear = '-'
     private var liveBrakePct = 0
     private var liveHp = 0
@@ -93,25 +93,25 @@ class BluetoothSerialManager(
     private var timerState = 0 // 0 = ready, 1 = running, 2 = done
     private var timerStartMs = 0L
     private var accel0to60 = 0.0f
-    private var best0to60 = 5.28f
+    private var best0to60 = 0.0f
 
     // Diagnostics & Powertrain State
-    private var liveAfr = 14.7f
+    private var liveAfr = 0.0f
     private var liveStft = 0.0f
     private var liveLtft = 0.0f
-    private var liveRailPressurePsi = 500
-    private var liveSparkAdvance = 14.0f
+    private var liveRailPressurePsi = 0
+    private var liveSparkAdvance = 0.0f
     private var liveKnockRetard = 0.0f
 
     // TPMS
-    private var flPsi = 32.0f
-    private var frPsi = 32.0f
-    private var rlPsi = 32.0f
-    private var rrPsi = 32.0f
-    private var flTemp = 24.0f
-    private var frTemp = 24.0f
-    private var rlTemp = 24.0f
-    private var rrTemp = 24.0f
+    private var flPsi = 0.0f
+    private var frPsi = 0.0f
+    private var rlPsi = 0.0f
+    private var rrPsi = 0.0f
+    private var flTemp = 0.0f
+    private var frTemp = 0.0f
+    private var rlTemp = 0.0f
+    private var rrTemp = 0.0f
 
     // Dynamic Braking Tracking
     private var lastSpeedKmh = 0
@@ -125,7 +125,6 @@ class BluetoothSerialManager(
 
         workerThread = Thread({
             dataLogger.startSession()
-            telemetrySimulator.start()
 
             while (running.get()) {
                 try {
@@ -575,7 +574,7 @@ class BluetoothSerialManager(
             min(60.0f, max(0.0f, (liveSpeedKmh * 0.621371f) / max(0.1f, (liveEngineLoadPct * 0.04f))))
         } else 0.0f
 
-        val rangeMiles = (liveFuelLevelPct * 4.2f).toInt()
+        val rangeMiles = if (liveFuelLevelPct > 0) (liveFuelLevelPct * 4.2f).toInt() else 0
 
         // Push to C++ UI Engine
         NativeBridge.nativeUpdateFullTelemetry(
@@ -583,10 +582,10 @@ class BluetoothSerialManager(
             liveBatVolts, liveEngineLoadPct, liveThrottlePct, liveFuelLevelPct,
             liveGear, liveBrakePct, liveHp, liveTorque,
             accel0to60, best0to60, timerState,
-            instantMpg, 32.8f, 0.0f, rangeMiles,
+            instantMpg, 0.0f, 0.0f, rangeMiles,
             liveAfr, liveStft, liveLtft, liveKnockRetard, liveRailPressurePsi,
             liveSparkAdvance, 0.0f, 0.0f,
-            liveOilTempC - 10, 0, 0.0f,
+            if (liveOilTempC > 0) liveOilTempC - 10 else 0, 0, 0.0f,
             flPsi, frPsi, rlPsi, rrPsi,
             flTemp, frTemp, rlTemp, rrTemp,
             0, false, true

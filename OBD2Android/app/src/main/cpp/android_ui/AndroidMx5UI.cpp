@@ -793,10 +793,10 @@ lv_obj_t* AndroidMx5UI::buildTrackScreen() {
     lockNoScroll(badgeLbl);
 
     trackBestLbl_ = lv_label_create(timerCard);
-    lv_obj_set_style_text_font(trackBestLbl_, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(trackBestLbl_, C_DIM, 0);
-    lv_label_set_text(trackBestLbl_, "BEST: 5.70 s");
-    lv_obj_align(trackBestLbl_, LV_ALIGN_BOTTOM_MID, 0, -14);
+    lv_obj_set_style_text_font(trackBestLbl_, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(trackBestLbl_, C_SPEED, 0);
+    lv_label_set_text(trackBestLbl_, "BEST: -- s");
+    lv_obj_align(trackBestLbl_, LV_ALIGN_TOP_LEFT, 24, 75);
     lockNoScroll(trackBestLbl_);
 
     // Middle Dials: Live HP & Torque Output (130x130 @ 335, 50 & 335, 195)
@@ -1039,7 +1039,7 @@ lv_obj_t* AndroidMx5UI::buildDiagnosticsScreen() {
     diagBattery_ = lv_label_create(card);
     setTextFont(diagBattery_);
     lv_obj_set_style_text_color(diagBattery_, C_DIM, 0);
-    lv_label_set_text_fmt(diagBattery_, "Battery: 14.2 V");
+    lv_label_set_text(diagBattery_, "Battery: -- V");
     lv_obj_align(diagBattery_, LV_ALIGN_TOP_RIGHT, -20, 12);
     lockNoScroll(diagBattery_);
 
@@ -1668,21 +1668,21 @@ lv_obj_t* AndroidMx5UI::buildDiagSubFuel() {
     diagAfrVal_ = lv_label_create(info);
     lv_obj_set_style_text_font(diagAfrVal_, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(diagAfrVal_, C_SPEED, 0);
-    lv_label_set_text(diagAfrVal_, "Air/Fuel Ratio: 14.7:1");
+    lv_label_set_text(diagAfrVal_, "Air/Fuel Ratio: --");
     lv_obj_align(diagAfrVal_, LV_ALIGN_TOP_LEFT, 16, 20);
     lockNoScroll(diagAfrVal_);
 
     diagHpfpVal_ = lv_label_create(info);
     lv_obj_set_style_text_font(diagHpfpVal_, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(diagHpfpVal_, C_SPEED, 0);
-    lv_label_set_text(diagHpfpVal_, "Rail Pressure: 2900 PSI");
+    lv_label_set_text(diagHpfpVal_, "Rail Pressure: -- PSI");
     lv_obj_align(diagHpfpVal_, LV_ALIGN_TOP_LEFT, 16, 60);
     lockNoScroll(diagHpfpVal_);
 
     diagEvapVal_ = lv_label_create(info);
     lv_obj_set_style_text_font(diagEvapVal_, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(diagEvapVal_, C_SPEED, 0);
-    lv_label_set_text(diagEvapVal_, "EVAP Vapor: Normal");
+    lv_label_set_text(diagEvapVal_, "EVAP Vapor: --");
     lv_obj_align(diagEvapVal_, LV_ALIGN_TOP_LEFT, 16, 100);
     lockNoScroll(diagEvapVal_);
 
@@ -1870,8 +1870,8 @@ lv_obj_t* AndroidMx5UI::buildDiagSubSmog() {
 
     smogSummaryLbl_ = lv_label_create(card);
     lv_obj_set_style_text_font(smogSummaryLbl_, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(smogSummaryLbl_, C_OK, 0);
-    lv_label_set_text(smogSummaryLbl_, "ALL EMISSION MONITORS READY (PASS)");
+    lv_obj_set_style_text_color(smogSummaryLbl_, C_WARN, 0);
+    lv_label_set_text(smogSummaryLbl_, "EMISSION MONITORS INCOMPLETE (NOT READY)");
     lv_obj_align(smogSummaryLbl_, LV_ALIGN_TOP_LEFT, 24, 16);
     lockNoScroll(smogSummaryLbl_);
 
@@ -1894,7 +1894,7 @@ lv_obj_t* AndroidMx5UI::buildDiagSubSmog() {
         lv_obj_remove_style_all(smogPodDot_[i]);
         lv_obj_set_size(smogPodDot_[i], 10, 10);
         lv_obj_set_pos(smogPodDot_[i], 12, 14);
-        lv_obj_set_style_bg_color(smogPodDot_[i], C_OK, 0);
+        lv_obj_set_style_bg_color(smogPodDot_[i], C_WARN, 0);
         lv_obj_set_style_bg_opa(smogPodDot_[i], LV_OPA_COVER, 0);
         lv_obj_set_style_radius(smogPodDot_[i], LV_RADIUS_CIRCLE, 0);
         lockNoScroll(smogPodDot_[i]);
@@ -1908,8 +1908,8 @@ lv_obj_t* AndroidMx5UI::buildDiagSubSmog() {
 
         smogPodLbl_[i] = lv_label_create(p);
         lv_obj_set_style_text_font(smogPodLbl_[i], &lv_font_montserrat_10, 0);
-        lv_obj_set_style_text_color(smogPodLbl_[i], C_OK, 0);
-        lv_label_set_text(smogPodLbl_[i], "READY");
+        lv_obj_set_style_text_color(smogPodLbl_[i], C_WARN, 0);
+        lv_label_set_text(smogPodLbl_[i], "NOT READY");
         lv_obj_align(smogPodLbl_[i], LV_ALIGN_LEFT_MID, 30, 12);
         lockNoScroll(smogPodLbl_[i]);
     }
@@ -2464,9 +2464,14 @@ void AndroidMx5UI::updateSpeedScreen() {
             lv_label_set_text_fmt(fuelSeg_.val, "%u%%", data_local_.fuelLevelPct);
         }
 
-        updateDottedValue(ambientSeg_, (tempU(data_local_.ambientC) + 20) / 140.0f);
-        if (ambientSeg_.val) {
-            lv_label_set_text_fmt(ambientSeg_.val, "%d°", tempU(data_local_.ambientC));
+        if (data_local_.ambientC == 0) {
+            updateDottedValue(ambientSeg_, 0.0f);
+            if (ambientSeg_.val) lv_label_set_text(ambientSeg_.val, "--°");
+        } else {
+            updateDottedValue(ambientSeg_, (tempU(data_local_.ambientC) + 20) / 140.0f);
+            if (ambientSeg_.val) {
+                lv_label_set_text_fmt(ambientSeg_.val, "%d°", tempU(data_local_.ambientC));
+            }
         }
     }
 }
@@ -2488,7 +2493,7 @@ void AndroidMx5UI::updateTpmsScreen() {
         }
 
         if (tpmsTemp_[i]) {
-            if (isKnown) {
+            if (isKnown && data_local_.tireTemp[i] > 0.0f) {
                 lv_label_set_text_fmt(tpmsTemp_[i], "%d °F", tempU(data_local_.tireTemp[i]));
             } else {
                 lv_label_set_text(tpmsTemp_[i], "-- °F");
@@ -2520,24 +2525,52 @@ void AndroidMx5UI::updateRpmScreen() {
     if (throttleSeg_.val) lv_label_set_text_fmt(throttleSeg_.val, "%u%%", data_local_.throttlePct);
 
     updateDottedValue(fuelArcSeg_, data_local_.fuelLevelPct / 100.0f);
-    if (fuelArcSeg_.val) lv_label_set_text_fmt(fuelArcSeg_.val, "%u%%", data_local_.fuelLevelPct);
+    if (fuelArcSeg_.val) {
+        if (data_local_.fuelLevelPct == 0) lv_label_set_text(fuelArcSeg_.val, "--%");
+        else lv_label_set_text_fmt(fuelArcSeg_.val, "%u%%", data_local_.fuelLevelPct);
+    }
 
-    updateDottedValue(batArcSeg_, (data_local_.batteryVolts - 10.0f) / 5.0f);
-    if (batArcSeg_.val) lv_label_set_text_fmt(batArcSeg_.val, "%.1fV", data_local_.batteryVolts);
+    if (data_local_.batteryVolts < 1.0f) {
+        updateDottedValue(batArcSeg_, 0.0f);
+        if (batArcSeg_.val) lv_label_set_text(batArcSeg_.val, "--V");
+    } else {
+        updateDottedValue(batArcSeg_, (data_local_.batteryVolts - 10.0f) / 5.0f);
+        if (batArcSeg_.val) lv_label_set_text_fmt(batArcSeg_.val, "%.1fV", data_local_.batteryVolts);
+    }
 }
 
 void AndroidMx5UI::updateEngineScreen() {
-    updateDottedValue(coolantSeg_, (tempU(data_local_.coolantC) - 100.0f) / 160.0f);
-    if (coolantSeg_.val) lv_label_set_text_fmt(coolantSeg_.val, "%d °F", tempU(data_local_.coolantC));
+    if (data_local_.coolantC == 0) {
+        updateDottedValue(coolantSeg_, 0.0f);
+        if (coolantSeg_.val) lv_label_set_text(coolantSeg_.val, "-- °F");
+    } else {
+        updateDottedValue(coolantSeg_, (tempU(data_local_.coolantC) - 100.0f) / 160.0f);
+        if (coolantSeg_.val) lv_label_set_text_fmt(coolantSeg_.val, "%d °F", tempU(data_local_.coolantC));
+    }
 
-    updateDottedValue(oilSeg_, (tempU(data_local_.oilTempC) - 100.0f) / 180.0f);
-    if (oilSeg_.val) lv_label_set_text_fmt(oilSeg_.val, "%d °F", tempU(data_local_.oilTempC));
+    if (data_local_.oilTempC == 0) {
+        updateDottedValue(oilSeg_, 0.0f);
+        if (oilSeg_.val) lv_label_set_text(oilSeg_.val, "-- °F");
+    } else {
+        updateDottedValue(oilSeg_, (tempU(data_local_.oilTempC) - 100.0f) / 180.0f);
+        if (oilSeg_.val) lv_label_set_text_fmt(oilSeg_.val, "%d °F", tempU(data_local_.oilTempC));
+    }
 
-    updateDottedValue(intakeSeg_, (tempU(data_local_.intakeAirC) + 20.0f) / 140.0f);
-    if (intakeSeg_.val) lv_label_set_text_fmt(intakeSeg_.val, "%d °F", tempU(data_local_.intakeAirC));
+    if (data_local_.intakeAirC == 0) {
+        updateDottedValue(intakeSeg_, 0.0f);
+        if (intakeSeg_.val) lv_label_set_text(intakeSeg_.val, "-- °F");
+    } else {
+        updateDottedValue(intakeSeg_, (tempU(data_local_.intakeAirC) + 20.0f) / 140.0f);
+        if (intakeSeg_.val) lv_label_set_text_fmt(intakeSeg_.val, "%d °F", tempU(data_local_.intakeAirC));
+    }
 
-    updateDottedValue(batterySeg_, (data_local_.batteryVolts - 10.0f) / 5.0f);
-    if (batterySeg_.val) lv_label_set_text_fmt(batterySeg_.val, "%.1f V", data_local_.batteryVolts);
+    if (data_local_.batteryVolts < 1.0f) {
+        updateDottedValue(batterySeg_, 0.0f);
+        if (batterySeg_.val) lv_label_set_text(batterySeg_.val, "-- V");
+    } else {
+        updateDottedValue(batterySeg_, (data_local_.batteryVolts - 10.0f) / 5.0f);
+        if (batterySeg_.val) lv_label_set_text_fmt(batterySeg_.val, "%.1f V", data_local_.batteryVolts);
+    }
 }
 
 void AndroidMx5UI::updateTrackScreen() {
@@ -2545,7 +2578,11 @@ void AndroidMx5UI::updateTrackScreen() {
         lv_label_set_text_fmt(trackTimerLbl_, "%.2f s", data_local_.accel0to60TimeSec);
     }
     if (trackBestLbl_) {
-        lv_label_set_text_fmt(trackBestLbl_, "BEST: %.2f s", data_local_.best0to60TimeSec);
+        if (data_local_.best0to60TimeSec <= 0.01f) {
+            lv_label_set_text(trackBestLbl_, "BEST: -- s");
+        } else {
+            lv_label_set_text_fmt(trackBestLbl_, "BEST: %.2f s", data_local_.best0to60TimeSec);
+        }
     }
     updateDottedValue(hpSeg_, data_local_.estHorsepower / 200.0f);
     if (hpSeg_.val) lv_label_set_text_fmt(hpSeg_.val, "%u HP", data_local_.estHorsepower);
@@ -2564,14 +2601,44 @@ void AndroidMx5UI::updateTripScreen() {
     updateDottedValue(instantMpgSeg_, data_local_.instantMpg / 60.0f);
     if (instantMpgSeg_.val) lv_label_set_text_fmt(instantMpgSeg_.val, "%.1f", data_local_.instantMpg);
 
-    if (tripAvgVal_) lv_label_set_text_fmt(tripAvgVal_, "%.1f", data_local_.tripAvgMpg);
-    if (tripRangeVal_) lv_label_set_text_fmt(tripRangeVal_, "%u", data_local_.rangeMiles);
-    if (tripDistVal_) lv_label_set_text_fmt(tripDistVal_, "%.1f", data_local_.tripDistanceMiles);
-    if (tripFuelVal_) lv_label_set_text_fmt(tripFuelVal_, "%u%%", data_local_.fuelLevelPct);
+    if (tripAvgVal_) {
+        if (data_local_.tripAvgMpg <= 0.01f) {
+            lv_label_set_text(tripAvgVal_, "--");
+        } else {
+            lv_label_set_text_fmt(tripAvgVal_, "%.1f", data_local_.tripAvgMpg);
+        }
+    }
+    if (tripRangeVal_) {
+        if (data_local_.rangeMiles == 0) {
+            lv_label_set_text(tripRangeVal_, "--");
+        } else {
+            lv_label_set_text_fmt(tripRangeVal_, "%u", data_local_.rangeMiles);
+        }
+    }
+    if (tripDistVal_) {
+        if (data_local_.tripDistanceMiles <= 0.01f) {
+            lv_label_set_text(tripDistVal_, "--");
+        } else {
+            lv_label_set_text_fmt(tripDistVal_, "%.1f", data_local_.tripDistanceMiles);
+        }
+    }
+    if (tripFuelVal_) {
+        if (data_local_.fuelLevelPct == 0) {
+            lv_label_set_text(tripFuelVal_, "--%");
+        } else {
+            lv_label_set_text_fmt(tripFuelVal_, "%u%%", data_local_.fuelLevelPct);
+        }
+    }
 }
 
 void AndroidMx5UI::updateDiagnosticsScreen() {
-    if (diagBattery_) lv_label_set_text_fmt(diagBattery_, "Battery: %.1f V", data_local_.batteryVolts);
+    if (diagBattery_) {
+        if (data_local_.batteryVolts < 1.0f) {
+            lv_label_set_text(diagBattery_, "Battery: -- V");
+        } else {
+            lv_label_set_text_fmt(diagBattery_, "Battery: %.1f V", data_local_.batteryVolts);
+        }
+    }
     if (data_local_.dtcCount > 0) {
         if (diagDtcLbl_) {
             lv_label_set_text_fmt(diagDtcLbl_, "DTC %s: %s", data_local_.dtcCodes[0], data_local_.dtcDesc[0]);
@@ -2803,9 +2870,27 @@ void AndroidMx5UI::updateDiagSubFuel() {
     updateDottedValue(ltftSeg_, ltftFrac);
     if (ltftSeg_.val) lv_label_set_text_fmt(ltftSeg_.val, "%+.1f%%", data_local_.longTermFuelTrimPct);
 
-    if (diagAfrVal_) lv_label_set_text_fmt(diagAfrVal_, "Air/Fuel Ratio: %.2f : 1", data_local_.airFuelRatio);
-    if (diagHpfpVal_) lv_label_set_text_fmt(diagHpfpVal_, "Rail Pressure: %u PSI", data_local_.fuelRailPressurePsi);
-    if (diagEvapVal_) lv_label_set_text_fmt(diagEvapVal_, "EVAP Vapor: %+d Pa", data_local_.evapVaporPa);
+    if (diagAfrVal_) {
+        if (data_local_.airFuelRatio <= 0.01f) {
+            lv_label_set_text(diagAfrVal_, "Air/Fuel Ratio: --");
+        } else {
+            lv_label_set_text_fmt(diagAfrVal_, "Air/Fuel Ratio: %.2f : 1", data_local_.airFuelRatio);
+        }
+    }
+    if (diagHpfpVal_) {
+        if (data_local_.fuelRailPressurePsi == 0) {
+            lv_label_set_text(diagHpfpVal_, "Rail Pressure: 0 PSI");
+        } else {
+            lv_label_set_text_fmt(diagHpfpVal_, "Rail Pressure: %u PSI", data_local_.fuelRailPressurePsi);
+        }
+    }
+    if (diagEvapVal_) {
+        if (data_local_.evapVaporPa == 0) {
+            lv_label_set_text(diagEvapVal_, "EVAP Vapor: --");
+        } else {
+            lv_label_set_text_fmt(diagEvapVal_, "EVAP Vapor: %+d Pa", data_local_.evapVaporPa);
+        }
+    }
 }
 
 void AndroidMx5UI::updateDiagSubCyl() {
@@ -2820,10 +2905,18 @@ void AndroidMx5UI::updateDiagSubCyl() {
 
 void AndroidMx5UI::updateDiagSubChassis() {
     if (diagSasVal_) {
-        lv_label_set_text_fmt(diagSasVal_, "Est. Engine Output: %u HP / %u lb-ft", data_local_.estHorsepower, data_local_.estTorqueFtLb);
+        if (data_local_.estHorsepower == 0 && data_local_.estTorqueFtLb == 0) {
+            lv_label_set_text(diagSasVal_, "Est. Engine Output: -- HP / -- lb-ft");
+        } else {
+            lv_label_set_text_fmt(diagSasVal_, "Est. Engine Output: %u HP / %u lb-ft", data_local_.estHorsepower, data_local_.estTorqueFtLb);
+        }
     }
     if (diagTransTempVal_) {
-        lv_label_set_text_fmt(diagTransTempVal_, "Engine Load / Demand: %u %%", data_local_.engineLoadPct);
+        if (data_local_.engineLoadPct == 0) {
+            lv_label_set_text(diagTransTempVal_, "Engine Load / Demand: -- %");
+        } else {
+            lv_label_set_text_fmt(diagTransTempVal_, "Engine Load / Demand: %u %%", data_local_.engineLoadPct);
+        }
     }
     if (diagTccSlipVal_) {
         lv_label_set_text_fmt(diagTccSlipVal_, "Dynamic Decel / Braking: %u%%", data_local_.brakePressurePct);
