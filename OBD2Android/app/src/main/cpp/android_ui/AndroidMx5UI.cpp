@@ -2769,8 +2769,29 @@ void AndroidMx5UI::onWheelMapActionClick(lv_event_t* e) {
     }
 }
 
-void AndroidMx5UI::updateDiagSubFuel() {}
-void AndroidMx5UI::updateDiagSubCyl() {}
+void AndroidMx5UI::updateDiagSubFuel() {
+    float stftFrac = (data_local_.shortTermFuelTrimPct + 25.0f) / 50.0f;
+    updateDottedValue(stftSeg_, stftFrac);
+    if (stftSeg_.val) lv_label_set_text_fmt(stftSeg_.val, "%+.1f%%", data_local_.shortTermFuelTrimPct);
+
+    float ltftFrac = (data_local_.longTermFuelTrimPct + 25.0f) / 50.0f;
+    updateDottedValue(ltftSeg_, ltftFrac);
+    if (ltftSeg_.val) lv_label_set_text_fmt(ltftSeg_.val, "%+.1f%%", data_local_.longTermFuelTrimPct);
+
+    if (diagAfrVal_) lv_label_set_text_fmt(diagAfrVal_, "Air/Fuel Ratio: %.2f : 1", data_local_.airFuelRatio);
+    if (diagHpfpVal_) lv_label_set_text_fmt(diagHpfpVal_, "Rail Pressure: %u PSI", data_local_.fuelRailPressurePsi);
+    if (diagEvapVal_) lv_label_set_text_fmt(diagEvapVal_, "EVAP Vapor: %+d Pa", data_local_.evapVaporPa);
+}
+
+void AndroidMx5UI::updateDiagSubCyl() {
+    for (int i = 0; i < 4; i++) {
+        if (misfireCountLbl_[i]) {
+            uint16_t cnt = data_local_.cylMisfireCount[i];
+            lv_label_set_text_fmt(misfireCountLbl_[i], "%u", cnt);
+            lv_obj_set_style_text_color(misfireCountLbl_[i], (cnt == 0) ? C_OK : C_WARN, 0);
+        }
+    }
+}
 
 void AndroidMx5UI::updateDiagSubChassis() {
     if (diagSasVal_) {
@@ -2784,7 +2805,38 @@ void AndroidMx5UI::updateDiagSubChassis() {
     }
 }
 
-void AndroidMx5UI::updateDiagSubSmog() {}
+void AndroidMx5UI::updateDiagSubSmog() {
+    bool ready[8] = {
+        data_local_.imMisfireReady,
+        data_local_.imFuelReady,
+        data_local_.imCompReady,
+        data_local_.imCatReady,
+        data_local_.imEvapReady,
+        data_local_.imO2Ready,
+        data_local_.imO2HeaterReady,
+        data_local_.imEgrVvtReady
+    };
+    bool allReady = true;
+    for (int i = 0; i < 8; i++) {
+        if (!ready[i]) allReady = false;
+        if (smogPodDot_[i]) {
+            lv_obj_set_style_bg_color(smogPodDot_[i], ready[i] ? C_OK : C_WARN, 0);
+        }
+        if (smogPodLbl_[i]) {
+            lv_label_set_text(smogPodLbl_[i], ready[i] ? "READY" : "NOT READY");
+            lv_obj_set_style_text_color(smogPodLbl_[i], ready[i] ? C_OK : C_WARN, 0);
+        }
+    }
+    if (smogSummaryLbl_) {
+        if (allReady) {
+            lv_label_set_text(smogSummaryLbl_, "ALL EMISSION MONITORS READY (PASS)");
+            lv_obj_set_style_text_color(smogSummaryLbl_, C_OK, 0);
+        } else {
+            lv_label_set_text(smogSummaryLbl_, "EMISSION MONITORS INCOMPLETE (NOT READY)");
+            lv_obj_set_style_text_color(smogSummaryLbl_, C_WARN, 0);
+        }
+    }
+}
 void AndroidMx5UI::updateDiagSubLogs() {}
 void AndroidMx5UI::updateBleConfigScreen() {}
 void AndroidMx5UI::updateSetupWizard() {}

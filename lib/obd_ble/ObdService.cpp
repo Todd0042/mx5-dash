@@ -225,6 +225,29 @@ static bool parsePidBytes(const char* resp, const char* pidHex, uint8_t* out, ui
     return true;
 }
 
+static bool parseMode22Bytes(const char* resp, const char* didHex, uint8_t* out, uint8_t n) {
+    char needle[7];
+    needle[0] = '6';
+    needle[1] = '2';
+    size_t dlen = strlen(didHex);
+    if (dlen > 4) dlen = 4;
+    for (size_t i = 0; i < dlen; i++) {
+        needle[2 + i] = didHex[i];
+    }
+    needle[2 + dlen] = '\0';
+
+    const char* p = strstr(resp, needle);
+    if (!p) return false;
+    p += 2 + dlen;
+
+    for (uint8_t i = 0; i < n; i++) {
+        uint8_t hi = 0, lo = 0;
+        if (!hexVal(p[i * 2], hi) || !hexVal(p[i * 2 + 1], lo)) return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
 bool ObdService::readUint8(Impl& i, const char* cmd, const char* pidHex, uint8_t& out) {
     char resp[BleElm::MAX_RESPONSE];
     if (!i.elm.sendQuery(cmd, resp, sizeof(resp), 400)) { i.pollErrors++; return false; }
@@ -289,7 +312,7 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
             if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
                 if (readUint8(i, "0104", "04", b)) {
                     portENTER_CRITICAL(&i.mux);
-                    i.data.engineLoadPct = b;
+                    i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
                     portEXIT_CRITICAL(&i.mux);
                 }
                 i.lastSeqMs = now;
@@ -298,8 +321,11 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
         case 3:
             if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
                 if (readUint8(i, "0111", "11", b)) {
+                    uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
+                    uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
+                    if (eff > 100) eff = 100;
                     portENTER_CRITICAL(&i.mux);
-                    i.data.throttlePct = b;
+                    i.data.throttlePct = eff;
                     portEXIT_CRITICAL(&i.mux);
                 }
                 i.lastSeqMs = now;
@@ -309,7 +335,7 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
             if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
                 if (readUint8(i, "012F", "2F", b)) {
                     portENTER_CRITICAL(&i.mux);
-                    i.data.fuelLevelPct = b;
+                    i.data.fuelLevelPct = (uint8_t)(((uint16_t)b * 100) / 255);
                     portEXIT_CRITICAL(&i.mux);
                 }
                 i.lastSeqMs = now;
@@ -327,9 +353,9 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
             break;
         case 6:
             if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
-                if (readUint8(i, "0142", "42", b)) {
+                if (readUint16(i, "0142", "42", tmp)) {
                     portENTER_CRITICAL(&i.mux);
-                    i.data.batteryVolts = b * 0.1f;
+                    i.data.batteryVolts = (float)tmp / 1000.0f;
                     portEXIT_CRITICAL(&i.mux);
                 }
                 i.lastSeqMs = now;
@@ -338,9 +364,12 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
         case 7:
             if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
                 if (readUint8(i, "0146", "46", b)) {
-                    portENTER_CRITICAL(&i.mux);
-                    i.data.ambientC = b > 40 ? b - 40 : 0;
-                    portEXIT_CRITICAL(&i.mux);
+                    int16_t temp = (int16_t)b - 40;
+                    if (temp >= -40 && temp <= 55) {
+                        portENTER_CRITICAL(&i.mux);
+                        i.data.ambientC = (uint8_t)(temp > 0 ? temp : 0);
+                        portEXIT_CRITICAL(&i.mux);
+                    }
                 }
                 i.lastSeqMs = now;
             }
@@ -354,15 +383,15 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
     // Advance the rotation, wrapping back to 0
     i.slowIdx = (i.slowIdx + 1) % 8;
 
-    // optional Mode 22 oil temp (DID 1310) - best effort, may be unsupported
+    // optional Mode 22 oil temp (DID 1310) - SkyActiv Engine Oil Temperature
     if (now - i.lastOilMs >= 3000) {
         i.lastOilMs = now;
         char resp[BleElm::MAX_RESPONSE];
         if (i.elm.sendQuery("221310", resp, sizeof(resp), 500)) {
-            uint8_t ob[3];
-            if (parsePidBytes(resp, "13", ob, 3)) {
+            uint8_t ob[1];
+            if (parseMode22Bytes(resp, "1310", ob, 1)) {
                 portENTER_CRITICAL(&i.mux);
-                i.data.oilTempC = ob[2];
+                i.data.oilTempC = (ob[0] > 40) ? (ob[0] - 40) : 0;
                 portEXIT_CRITICAL(&i.mux);
             }
         }

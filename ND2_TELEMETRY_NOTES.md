@@ -10,7 +10,7 @@ This document is the authoritative engineering and implementation guide for the 
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Vehicle Speed** | ✅ **YES** | `010D` (PCM) | `7E0` (PCM) | `A` | km/h (or mph $\times 0.621371$) | Highest priority PID. Polled at ~35–45 Hz. |
 | **Engine RPM** | ✅ **YES** | `010C` (PCM) | `7E0` (PCM) | `((A * 256) + B) / 4.0` | RPM | High priority PID (~20–30 Hz). Redline 7,500 RPM. |
-| **Throttle Position (TPS)** | ✅ **YES** | `0111` (PCM) | `7E0` (PCM) | `(A * 100) / 255.0` | % | Throttle valve position. |
+| **Throttle Position (TPS)** | ✅ **YES** | `0111` (PCM) | `7E0` (PCM) | $T_{\text{raw}} = \frac{A \times 100}{255}$, $T_{\text{eff}} = \text{clamp}\left(\frac{(T_{\text{raw}} - 13) \times 100}{87}, 0, 100\right)$ | % | Calibrated: 13% raw idle is mapped to 0% baseline throttle. |
 | **Calculated Engine Load** | ✅ **YES** | `0104` (PCM) | `7E0` (PCM) | `(A * 100) / 255.0` | % | Absolute engine load. |
 | **Coolant Temp (ECT)** | ✅ **YES** | `0105` (PCM) | `7E0` (PCM) | `A - 40` | °C (or °F $= C \times 1.8 + 32$) | Nominal: 185–215°F. Overheat threshold: $\ge 226^\circ\text{F}$. |
 | **Intake Air Temp (IAT)** | ✅ **YES** | `010F` (PCM) | `7E0` (PCM) | `A - 40` | °C | Pre-manifold intake charge air temperature. |

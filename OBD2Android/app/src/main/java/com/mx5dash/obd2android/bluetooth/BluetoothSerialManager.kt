@@ -16,6 +16,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 class BluetoothSerialManager(
     private val context: Context,
@@ -256,6 +257,15 @@ class BluetoothSerialManager(
         return bytes
     }
 
+    private fun parseCalibratedThrottle(rawByte: Int): Int {
+        val rawPct = (rawByte * 100f) / 255f
+        return if (rawPct <= 13.0f) {
+            0
+        } else {
+            min(100, (((rawPct - 13.0f) * 100f) / 87.0f).roundToInt())
+        }
+    }
+
     private fun runPollingLoop(sock: BluetoothSocket) {
         val input = sock.inputStream
         val output = sock.outputStream
@@ -390,7 +400,7 @@ class BluetoothSerialManager(
                     3 -> {
                         val resp = sendObdCommand(output, input, "0111", 80)
                         val bytes = parseHexBytes(resp, "4111")
-                        if (bytes.isNotEmpty()) liveThrottlePct = (bytes[0] * 100) / 255
+                        if (bytes.isNotEmpty()) liveThrottlePct = parseCalibratedThrottle(bytes[0])
                     }
                 }
             }
@@ -425,7 +435,7 @@ class BluetoothSerialManager(
                     0 -> {
                         val resp = sendObdCommand(output, input, "0111", 80)
                         val bytes = parseHexBytes(resp, "4111")
-                        if (bytes.isNotEmpty()) liveThrottlePct = (bytes[0] * 100) / 255
+                        if (bytes.isNotEmpty()) liveThrottlePct = parseCalibratedThrottle(bytes[0])
                     }
                     1 -> {
                         val resp = sendObdCommand(output, input, "010C", 80)
@@ -449,25 +459,30 @@ class BluetoothSerialManager(
                     }
                 }
             }
-            // Diagnostic Screens (6, 8-12): Trims, Fuel Rail, AFR, Timing
+            // Diagnostic Screens (6, 8-12): Trims (STFT & LTFT), Fuel Rail, AFR, Timing
             else -> {
-                when (tick % 4) {
+                when (tick % 5) {
                     0 -> {
                         val resp = sendObdCommand(output, input, "0106", 80)
                         val bytes = parseHexBytes(resp, "4106")
                         if (bytes.isNotEmpty()) liveStft = ((bytes[0] - 128) * 100f) / 128f
                     }
                     1 -> {
+                        val resp = sendObdCommand(output, input, "0107", 80)
+                        val bytes = parseHexBytes(resp, "4107")
+                        if (bytes.isNotEmpty()) liveLtft = ((bytes[0] - 128) * 100f) / 128f
+                    }
+                    2 -> {
                         val resp = sendObdCommand(output, input, "0123", 80)
                         val bytes = parseHexBytes(resp, "4123")
                         if (bytes.size >= 2) liveRailPressurePsi = ((((bytes[0] * 256) + bytes[1]) * 10) * 0.145038f).toInt()
                     }
-                    2 -> {
+                    3 -> {
                         val resp = sendObdCommand(output, input, "0124", 80)
                         val bytes = parseHexBytes(resp, "4124")
                         if (bytes.size >= 2) liveAfr = (((bytes[0] * 256) + bytes[1]) / 32768.0f) * 14.7f
                     }
-                    3 -> {
+                    4 -> {
                         val resp = sendObdCommand(output, input, "010E", 80)
                         val bytes = parseHexBytes(resp, "410E")
                         if (bytes.isNotEmpty()) liveSparkAdvance = (bytes[0] / 2.0f) - 64.0f
