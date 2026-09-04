@@ -33,6 +33,8 @@ struct ObdService::Impl {
     uint8_t  prevSpeedKmh = 0;
     uint32_t prevSpeedMs = 0;
     uint32_t lastDimCheckMs = 0;
+    uint32_t lastSafetySweepMs = 0;
+    volatile uint8_t activeScreen_ = 0;
 
     // Setup wizard / calibration state (updated under mux)
     volatile bool frozen_ = false;            // task suspended (wizard up)
@@ -271,129 +273,244 @@ bool ObdService::readUint16(Impl& i, const char* cmd, const char* pidHex, uint16
 // in flight at a time (the dongle is single-command, prompt-terminated).
 // ---------------------------------------------------------------------------
 
+void ObdService::setActiveScreen(uint8_t screenIndex) {
+    if (!impl_) return;
+    portENTER_CRITICAL(&impl_->mux);
+    impl_->activeScreen_ = screenIndex;
+    portEXIT_CRITICAL(&impl_->mux);
+}
+
 void ObdService::pollTick(Impl& i, uint32_t now) {
     uint16_t tmp = 0;
     uint8_t b = 0;
 
-    // rpm - fastest
-    if (now - i.lastRpmMs >= MX5_POLL_RPM_MS) {
-        i.lastRpmMs = now;
-        if (readUint16(i, "010C", "0C", tmp)) {
-            tmp /= 4;
+    // 1. ALWAYS Poll High-Priority Speed (010D)
+    if (now - i.lastSeqMs >= MX5_POLL_FAST_MS) {
+        i.lastSeqMs = now;
+        if (readUint8(i, "010D", "0D", b)) {
             portENTER_CRITICAL(&i.mux);
-            i.data.rpm = tmp;
+            i.data.speedKmh = b;
             portEXIT_CRITICAL(&i.mux);
         }
     }
 
-    // medium/slow group, rotated one PID per tick
-    switch (i.slowIdx) {
-        case 0:
-            if (now - i.lastSeqMs >= MX5_POLL_FAST_MS) {
-                if (readUint8(i, "010D", "0D", b)) {
-                    portENTER_CRITICAL(&i.mux);
-                    i.data.speedKmh = b;
-                    portEXIT_CRITICAL(&i.mux);
-                }
-                i.lastSeqMs = now;
-            }
-            break;
-        case 1:
-            if (now - i.lastSeqMs >= MX5_POLL_FAST_MS) {
-                if (readUint8(i, "0105", "05", b)) {
-                    portENTER_CRITICAL(&i.mux);
-                    i.data.coolantC = b > 40 ? b - 40 : 0;
-                    portEXIT_CRITICAL(&i.mux);
-                }
-                i.lastSeqMs = now;
-            }
-            break;
-        case 2:
-            if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
-                if (readUint8(i, "0104", "04", b)) {
-                    portENTER_CRITICAL(&i.mux);
-                    i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
-                    portEXIT_CRITICAL(&i.mux);
-                }
-                i.lastSeqMs = now;
-            }
-            break;
-        case 3:
-            if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
-                if (readUint8(i, "0111", "11", b)) {
-                    uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
-                    uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
-                    if (eff > 100) eff = 100;
-                    portENTER_CRITICAL(&i.mux);
-                    i.data.throttlePct = eff;
-                    portEXIT_CRITICAL(&i.mux);
-                }
-                i.lastSeqMs = now;
-            }
-            break;
-        case 4:
-            if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
-                if (readUint8(i, "012F", "2F", b)) {
-                    portENTER_CRITICAL(&i.mux);
-                    i.data.fuelLevelPct = (uint8_t)(((uint16_t)b * 100) / 255);
-                    portEXIT_CRITICAL(&i.mux);
-                }
-                i.lastSeqMs = now;
-            }
-            break;
-        case 5:
-            if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
-                if (readUint8(i, "010F", "0F", b)) {
-                    portENTER_CRITICAL(&i.mux);
-                    i.data.intakeAirC = b > 40 ? b - 40 : 0;
-                    portEXIT_CRITICAL(&i.mux);
-                }
-                i.lastSeqMs = now;
-            }
-            break;
-        case 6:
-            if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
-                if (readUint16(i, "0142", "42", tmp)) {
-                    portENTER_CRITICAL(&i.mux);
-                    i.data.batteryVolts = (float)tmp / 1000.0f;
-                    portEXIT_CRITICAL(&i.mux);
-                }
-                i.lastSeqMs = now;
-            }
-            break;
-        case 7:
-            if (now - i.lastSeqMs >= MX5_POLL_SLOW_MS) {
-                if (readUint8(i, "0146", "46", b)) {
-                    int16_t temp = (int16_t)b - 40;
-                    if (temp >= -40 && temp <= 55) {
-                        portENTER_CRITICAL(&i.mux);
-                        i.data.ambientC = (uint8_t)(temp > 0 ? temp : 0);
-                        portEXIT_CRITICAL(&i.mux);
-                    }
-                }
-                i.lastSeqMs = now;
-            }
-            break;
-        default:
-            i.slowIdx = 0;
-            i.lastSeqMs = 0;
-            break;
-    }
+    uint8_t screen = i.activeScreen_;
+    i.slowIdx = (i.slowIdx + 1) % 16;
 
-    // Advance the rotation, wrapping back to 0
-    i.slowIdx = (i.slowIdx + 1) % 8;
-
-    // optional Mode 22 oil temp (DID 1310) - SkyActiv Engine Oil Temperature
-    if (now - i.lastOilMs >= 3000) {
-        i.lastOilMs = now;
+    // 2. 30-Second Safety Sweep (TPMS + Overheat alarms when not on Screen 1)
+    if (now - i.lastSafetySweepMs > 30000 && screen != 1) {
+        i.lastSafetySweepMs = now;
+        if (readUint8(i, "0105", "05", b)) {
+            portENTER_CRITICAL(&i.mux);
+            i.data.coolantC = b > 40 ? b - 40 : 0;
+            portEXIT_CRITICAL(&i.mux);
+        }
         char resp[BleElm::MAX_RESPONSE];
-        if (i.elm.sendQuery("221310", resp, sizeof(resp), 500)) {
+        if (i.elm.sendQuery("221310", resp, sizeof(resp), 400)) {
             uint8_t ob[1];
             if (parseMode22Bytes(resp, "1310", ob, 1)) {
                 portENTER_CRITICAL(&i.mux);
                 i.data.oilTempC = (ob[0] > 40) ? (ob[0] - 40) : 0;
                 portEXIT_CRITICAL(&i.mux);
             }
+        }
+    } else {
+        // 3. View-Driven Command Queue based on active screen
+        switch (screen) {
+            // Screen 0: Hero Speedometer -> RPM, Fuel %, Ambient Temp
+            case 0:
+                switch (i.slowIdx % 3) {
+                    case 0:
+                        if (readUint16(i, "010C", "0C", tmp)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.rpm = tmp / 4;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 1:
+                        if (readUint8(i, "012F", "2F", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.fuelLevelPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 2:
+                        if (readUint8(i, "0146", "46", b)) {
+                            int16_t temp = (int16_t)b - 40;
+                            if (temp >= -40 && temp <= 55) {
+                                portENTER_CRITICAL(&i.mux);
+                                i.data.ambientC = (uint8_t)(temp > 0 ? temp : 0);
+                                portEXIT_CRITICAL(&i.mux);
+                            }
+                        }
+                        break;
+                }
+                break;
+
+            // Screen 1: TPMS -> 4-Corner Pressure & Temp
+            case 1:
+                pollTpms(i, now);
+                break;
+
+            // Screen 2: Engine Tachometer -> Fast RPM, Load %, Calibrated Throttle %
+            case 2:
+                switch (i.slowIdx % 3) {
+                    case 0:
+                        if (readUint16(i, "010C", "0C", tmp)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.rpm = tmp / 4;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 1:
+                        if (readUint8(i, "0104", "04", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 2:
+                        if (readUint8(i, "0111", "11", b)) {
+                            uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
+                            uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
+                            if (eff > 100) eff = 100;
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.throttlePct = eff;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                }
+                break;
+
+            // Screen 3: Temperatures -> Coolant, Oil Temp, Intake Air, Battery
+            case 3:
+                switch (i.slowIdx % 4) {
+                    case 0:
+                        if (readUint8(i, "0105", "05", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.coolantC = b > 40 ? b - 40 : 0;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 1: {
+                        char resp[BleElm::MAX_RESPONSE];
+                        if (i.elm.sendQuery("221310", resp, sizeof(resp), 400)) {
+                            uint8_t ob[1];
+                            if (parseMode22Bytes(resp, "1310", ob, 1)) {
+                                portENTER_CRITICAL(&i.mux);
+                                i.data.oilTempC = (ob[0] > 40) ? (ob[0] - 40) : 0;
+                                portEXIT_CRITICAL(&i.mux);
+                            }
+                        }
+                        break;
+                    }
+                    case 2:
+                        if (readUint8(i, "010F", "0F", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.intakeAirC = b > 40 ? b - 40 : 0;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 3:
+                        if (readUint16(i, "0142", "42", tmp)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.batteryVolts = (float)tmp / 1000.0f;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                }
+                break;
+
+            // Screen 4: Track & Dynamics -> Calibrated Throttle %, RPM, Load %
+            case 4:
+                switch (i.slowIdx % 3) {
+                    case 0:
+                        if (readUint8(i, "0111", "11", b)) {
+                            uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
+                            uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
+                            if (eff > 100) eff = 100;
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.throttlePct = eff;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 1:
+                        if (readUint16(i, "010C", "0C", tmp)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.rpm = tmp / 4;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 2:
+                        if (readUint8(i, "0104", "04", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                }
+                break;
+
+            // Screen 5: Fuel & Trip Economy -> Fuel %, Load %
+            case 5:
+                switch (i.slowIdx % 2) {
+                    case 0:
+                        if (readUint8(i, "012F", "2F", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.fuelLevelPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 1:
+                        if (readUint8(i, "0104", "04", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                }
+                break;
+
+            // Diagnostic Screens (6, 8-12): Trims (STFT/LTFT), FRP, AFR, Spark Timing
+            default:
+                switch (i.slowIdx % 5) {
+                    case 0:
+                        if (readUint8(i, "0106", "06", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.shortTermFuelTrimPct = ((float)b - 128.0f) * (100.0f / 128.0f);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 1:
+                        if (readUint8(i, "0107", "07", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.longTermFuelTrimPct = ((float)b - 128.0f) * (100.0f / 128.0f);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 2:
+                        if (readUint16(i, "0123", "23", tmp)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.fuelRailPressurePsi = (uint16_t)((float)tmp * 10.0f * 0.145038f);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 3:
+                        if (readUint16(i, "0124", "24", tmp)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.airFuelRatio = ((float)tmp / 32768.0f) * 14.7f;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 4:
+                        if (readUint8(i, "010E", "0E", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.sparkAdvanceDeg = ((float)b / 2.0f) - 64.0f;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                }
+                break;
         }
     }
 
@@ -480,9 +597,29 @@ void ObdService::pollTpms(Impl& i, uint32_t now) {
     if (now - i.lastTpmsMs < MX5_TPMS_INTERVAL_MS) return;
     i.lastTpmsMs = now;
 
-    // TODO(calibration): sendQuery("222A05", ...) with ATH1 temporarily on,
-    // parsePidBytes-like match on "62" + DID, scale + map per Config tables,
-    // and write into i.data.tirePressure[]/tireTemp[]/tireKnown[].
+    // Switch to Instrument Cluster / BCM header 720
+    char resp[BleElm::MAX_RESPONSE];
+    i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
+
+    const char* dids[4] = {"2A05", "2A06", "2A07", "2A08"};
+    for (uint8_t k = 0; k < 4; k++) {
+        char cmd[16];
+        snprintf(cmd, sizeof(cmd), "22%s", dids[k]);
+        if (i.elm.sendQuery(cmd, resp, sizeof(resp), 250)) {
+            uint8_t ob[2];
+            if (parseMode22Bytes(resp, dids[k], ob, 2)) {
+                portENTER_CRITICAL(&i.mux);
+                float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
+                i.data.tirePressure[k] = psi / 14.5038f;
+                i.data.tireTemp[k] = (float)ob[1] - 40.0f;
+                i.data.tireKnown[k] = true;
+                portEXIT_CRITICAL(&i.mux);
+            }
+        }
+    }
+
+    // Restore PCM header 7E0
+    i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
 }
 
 // ---------------------------------------------------------------------------

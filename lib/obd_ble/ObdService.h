@@ -37,6 +37,9 @@ public:
 
     bool connected() const override { return connected_; }
 
+    // View-driven dynamic polling hint from UI layer
+    void setActiveScreen(uint8_t screenIndex) override;
+
     // --- BLE config forwarding to BleElm ------------------------------------
     void setBlePrefix(const char* prefix) override;
     void setBleScanTimeout(uint16_t ms) override;

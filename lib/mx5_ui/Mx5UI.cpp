@@ -17,6 +17,8 @@
 
 extern "C" {
     extern const lv_image_dsc_t mx5_rf_cal_dsc;
+    extern const lv_image_dsc_t mx5_rf_side_left_dsc;
+    extern const lv_image_dsc_t mx5_rf_side_right_dsc;
 }
 
 #ifndef M_PI
@@ -138,12 +140,164 @@ static lv_obj_t* addPageTitle(lv_obj_t* parent, const char* txt) {
 // Public Navigation API with Debounced Swipe Handling
 // ---------------------------------------------------------------------------
 
+static const char* getScreenTitle(uint8_t index) {
+    switch (index) {
+        case Mx5UI::SCREEN_SPEED:            return "HERO SPEEDOMETER";
+        case Mx5UI::SCREEN_TPMS:             return "TIRE MONITOR (TPMS)";
+        case Mx5UI::SCREEN_RPM:              return "ENGINE TACHOMETER";
+        case Mx5UI::SCREEN_TEMPS:            return "TEMPS & PRESSURES";
+        case Mx5UI::SCREEN_TRACK:            return "TRACK & DYNAMICS";
+        case Mx5UI::SCREEN_TRIP:             return "TRIP & FUEL ECONOMY";
+        case Mx5UI::SCREEN_DIAG:             return "DIAGNOSTICS & DTC";
+        case Mx5UI::SCREEN_MENU:             return "MENU HUB";
+        case Mx5UI::SCREEN_DIAG_SUB_FUEL:    return "FUEL TRIMS & HPFP";
+        case Mx5UI::SCREEN_DIAG_SUB_CYL:     return "CYLINDER MISFIRE";
+        case Mx5UI::SCREEN_DIAG_SUB_CHASSIS: return "CHASSIS & DYNAMICS";
+        case Mx5UI::SCREEN_DIAG_SUB_SMOG:    return "I/M SMOG READINESS";
+        case Mx5UI::SCREEN_DIAG_SUB_LOGS:    return "INCIDENT BLACKBOX";
+        case Mx5UI::SCREEN_SETTINGS:         return "DISPLAY SETTINGS";
+        case Mx5UI::SCREEN_BLE_CONFIG:       return "BLUETOOTH ADAPTER";
+        case Mx5UI::SCREEN_WIZARD:           return "SETUP WIZARD";
+        case Mx5UI::SCREEN_WHEEL_MAP:        return "TPMS CALIBRATION";
+        default: return "MX-5 DASHBOARD";
+    }
+}
+
+lv_obj_t* Mx5UI::buildTransitionScreen() {
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_remove_style_all(scr);
+    lv_obj_set_style_bg_color(scr, C_BG, 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lockNoScroll(scr);
+
+    // Top Destination Badge Pill
+    transBadge_ = lv_obj_create(scr);
+    lv_obj_remove_style_all(transBadge_);
+    lv_obj_set_size(transBadge_, 280, 34);
+    lv_obj_set_pos(transBadge_, 100, 20);
+    lv_obj_set_style_bg_color(transBadge_, C_PANEL, 0);
+    lv_obj_set_style_bg_opa(transBadge_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(transBadge_, 17, 0);
+    lv_obj_set_style_border_color(transBadge_, C_ACCENT, 0);
+    lv_obj_set_style_border_width(transBadge_, 1, 0);
+    lockNoScroll(transBadge_);
+
+    transTitleLbl_ = lv_label_create(transBadge_);
+    lv_obj_set_style_text_font(transTitleLbl_, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(transTitleLbl_, C_SPEED, 0);
+    lv_label_set_text(transTitleLbl_, "ENGINE TACHOMETER");
+    lv_obj_center(transTitleLbl_);
+    lockNoScroll(transTitleLbl_);
+
+    // Center Car Image (260x145)
+    transCarImg_ = lv_image_create(scr);
+    lv_image_set_src(transCarImg_, &mx5_rf_side_left_dsc);
+    lv_obj_set_pos(transCarImg_, 110, 75);
+    lockNoScroll(transCarImg_);
+
+    // Amber DRL Headlight dot
+    transDrlDot_ = lv_obj_create(scr);
+    lv_obj_remove_style_all(transDrlDot_);
+    lv_obj_set_size(transDrlDot_, 10, 10);
+    lv_obj_set_style_radius(transDrlDot_, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(transDrlDot_, lv_color_hex(0xFF9800), 0); // Amber
+    lv_obj_set_style_bg_opa(transDrlDot_, LV_OPA_COVER, 0);
+    lv_obj_set_pos(transDrlDot_, 132, 145);
+    lockNoScroll(transDrlDot_);
+
+    // Soul Red Taillight dot
+    transTailDot_ = lv_obj_create(scr);
+    lv_obj_remove_style_all(transTailDot_);
+    lv_obj_set_size(transTailDot_, 8, 8);
+    lv_obj_set_style_radius(transTailDot_, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(transTailDot_, lv_color_hex(0xD12229), 0); // Soul Red
+    lv_obj_set_style_bg_opa(transTailDot_, LV_OPA_COVER, 0);
+    lv_obj_set_pos(transTailDot_, 352, 137);
+    lockNoScroll(transTailDot_);
+
+    // Bottom Speed Pill
+    lv_obj_t* spdPill = lv_obj_create(scr);
+    lv_obj_remove_style_all(spdPill);
+    lv_obj_set_size(spdPill, 160, 32);
+    lv_obj_set_pos(spdPill, 160, 245);
+    lv_obj_set_style_bg_color(spdPill, lv_color_hex(0x0E1013), 0);
+    lv_obj_set_style_bg_opa(spdPill, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(spdPill, 16, 0);
+    lv_obj_set_style_border_color(spdPill, C_PANEL_BRD, 0);
+    lv_obj_set_style_border_width(spdPill, 1, 0);
+    lockNoScroll(spdPill);
+
+    transSpeedLbl_ = lv_label_create(spdPill);
+    lv_obj_set_style_text_font(transSpeedLbl_, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(transSpeedLbl_, C_SPEED, 0);
+    lv_label_set_text(transSpeedLbl_, "-- MPH");
+    lv_obj_center(transSpeedLbl_);
+    lockNoScroll(transSpeedLbl_);
+
+    return scr;
+}
+
+void Mx5UI::onTransitionTimer(lv_timer_t* t) {
+    Mx5UI* ui = static_cast<Mx5UI*>(lv_timer_get_user_data(t));
+    if (!ui || ui->pendingTargetScreen_ >= SCREEN_COUNT) return;
+
+    uint8_t target = ui->pendingTargetScreen_;
+    ui->pendingTargetScreen_ = 255;
+    ui->currentScreen_ = target;
+    if (target != SCREEN_MENU) {
+        ui->lastContentScreen_ = target;
+    }
+
+    lv_obj_scroll_to(ui->screens_[target], 0, 0, LV_ANIM_OFF);
+    lv_screen_load_anim(ui->screens_[target], ui->transitionForward_ ? LV_SCR_LOAD_ANIM_MOVE_LEFT : LV_SCR_LOAD_ANIM_MOVE_RIGHT, 120, 0, false);
+    ui->update();
+}
+
+void Mx5UI::setScreenWithTransition(uint8_t targetIndex, bool forward) {
+    if (targetIndex >= SCREEN_COUNT || !screens_[targetIndex]) return;
+    if (!transitionScr_) {
+        setScreen(targetIndex);
+        return;
+    }
+
+    pendingTargetScreen_ = targetIndex;
+    transitionForward_ = forward;
+    obd_.setActiveScreen(targetIndex);
+
+    // Update destination title
+    if (transTitleLbl_) {
+        lv_label_set_text(transTitleLbl_, getScreenTitle(targetIndex));
+    }
+    // Update car orientation and lighting dots
+    if (transCarImg_) {
+        lv_image_set_src(transCarImg_, forward ? &mx5_rf_side_left_dsc : &mx5_rf_side_right_dsc);
+    }
+    if (transDrlDot_) {
+        lv_obj_set_pos(transDrlDot_, forward ? 132 : 348, 145);
+    }
+    if (transTailDot_) {
+        lv_obj_set_pos(transTailDot_, forward ? 352 : 128, 137);
+    }
+    if (transSpeedLbl_) {
+        lv_label_set_text_fmt(transSpeedLbl_, "%u %s", (unitsUs_ ? speedU(data_local_.speedKmh) : data_local_.speedKmh), (unitsUs_ ? "MPH" : "KM/H"));
+    }
+
+    // Slide transition interstitial
+    lv_screen_load_anim(transitionScr_, forward ? LV_SCR_LOAD_ANIM_MOVE_LEFT : LV_SCR_LOAD_ANIM_MOVE_RIGHT, 120, 0, false);
+
+    // Hold for 260ms then slide into target screen
+    lv_timer_t* timer = lv_timer_create(onTransitionTimer, 260, this);
+    lv_timer_set_repeat_count(timer, 1);
+}
+
 void Mx5UI::setScreen(uint8_t index) {
     if (index >= SCREEN_COUNT || !screens_[index]) return;
     currentScreen_ = index;
     if (index != SCREEN_MENU) {
         lastContentScreen_ = index;
     }
+
+    obd_.setActiveScreen(index);
 
     // Reset scroll offsets so all screens remain perfectly centered
     lv_obj_scroll_to(screens_[currentScreen_], 0, 0, LV_ANIM_OFF);
@@ -159,11 +313,11 @@ void Mx5UI::nextScreen() {
     if (currentScreen_ >= 8 && currentScreen_ <= 11) {
         // Cycle forward among the 4 diagnostic sub-screens: 8 -> 9 -> 10 -> 11 -> 8
         uint8_t nextSub = 8 + ((currentScreen_ - 8 + 1) % 4);
-        setScreen(nextSub);
+        setScreenWithTransition(nextSub, true);
         return;
     }
     uint8_t next = (currentScreen_ + 1) % CONTENT_SCREEN_COUNT;
-    setScreen(next);
+    setScreenWithTransition(next, true);
 }
 
 void Mx5UI::prevScreen() {
@@ -174,11 +328,11 @@ void Mx5UI::prevScreen() {
     if (currentScreen_ >= 8 && currentScreen_ <= 11) {
         // Cycle backward among the 4 diagnostic sub-screens: 8 <- 9 <- 10 <- 11 <- 8
         uint8_t prevSub = 8 + ((currentScreen_ - 8 + 3) % 4);
-        setScreen(prevSub);
+        setScreenWithTransition(prevSub, false);
         return;
     }
     uint8_t prev = (currentScreen_ == 0) ? (CONTENT_SCREEN_COUNT - 1) : (currentScreen_ - 1);
-    setScreen(prev);
+    setScreenWithTransition(prev, false);
 }
 
 void Mx5UI::toggleMenu() {
@@ -271,6 +425,7 @@ void Mx5UI::begin() {
     screens_[SCREEN_BLE_CONFIG]       = buildBleConfigScreen();
     screens_[SCREEN_WIZARD]           = buildWizardScreen();
     screens_[SCREEN_WHEEL_MAP]        = buildWheelMapScreen();
+    transitionScr_                    = buildTransitionScreen();
 
     // Attach robust gesture & drag listener to all active screens
     for (uint8_t i = 0; i < SCREEN_COUNT; i++) {

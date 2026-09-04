@@ -93,6 +93,8 @@ private:
     lv_obj_t* buildDiagnosticsScreen();
     lv_obj_t* buildMenuScreen();
     lv_obj_t* buildSettingsScreen();
+    lv_obj_t* buildTransitionScreen();
+    void setScreenWithTransition(uint8_t targetIndex, bool forward);
 
     // ---- diagnostic sub-screen builders ----
     lv_obj_t* buildDiagSubFuel();
@@ -153,9 +155,21 @@ private:
     static void onWheelMapActionClick(lv_event_t* e);
     static void onBleDeviceSelectClick(lv_event_t* e);
     static void onBleActionClick(lv_event_t* e);
+    static void onTransitionTimer(lv_timer_t* t);
 
     VehicleData data_local_;      // snapshot of shared traffic pulled each update()
     ObdSource& obd_;
+
+    // Screen Transition Interstitial
+    lv_obj_t* transitionScr_ = nullptr;
+    lv_obj_t* transBadge_ = nullptr;
+    lv_obj_t* transTitleLbl_ = nullptr;
+    lv_obj_t* transCarImg_ = nullptr;
+    lv_obj_t* transDrlDot_ = nullptr;
+    lv_obj_t* transTailDot_ = nullptr;
+    lv_obj_t* transSpeedLbl_ = nullptr;
+    uint8_t pendingTargetScreen_ = 255;
+    bool transitionForward_ = true;
 
     // shared widgets - one speed chip per screen (screen 0 has none)
     lv_obj_t* speedChipLabel_[SCREEN_COUNT] = {};

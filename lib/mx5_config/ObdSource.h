@@ -30,6 +30,9 @@ public:
     // True when the OBD link is up (BLE + ELM handshake complete).
     virtual bool connected() const = 0;
 
+    // View-driven dynamic polling hint from UI layer
+    virtual void setActiveScreen(uint8_t screenIndex) { (void)screenIndex; }
+
     // --- BLE config & Device Discovery / Pairing ----------------------------
 
     virtual void setBlePrefix(const char* prefix) { (void)prefix; }
