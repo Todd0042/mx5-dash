@@ -319,10 +319,10 @@ class Mx5RenderView @JvmOverloads constructor(
 
         val carBitmap = if (isFacingLeft) carLeftBitmap else carRightBitmap
         if (carBitmap != null) {
-            val carW = 340f
+            val carW = 380f
             val carH = (carW * carBitmap.height / carBitmap.width)
             val dstLeft = -carW / 2f
-            val dstTop = (-carH / 2f) - 6f
+            val dstTop = -carH / 2f
             tempRect.set(dstLeft, dstTop, dstLeft + carW, dstTop + carH)
             canvas.drawBitmap(carBitmap, null, tempRect, paint)
 
@@ -331,15 +331,15 @@ class Mx5RenderView @JvmOverloads constructor(
             drlPaint.alpha = drlAlpha
             drlGlowPaint.alpha = (90 * pulse).toInt().coerceIn(0, 255)
             // Left headlight fixture
-            canvas.drawCircle(-146f, -16f, 8f, drlGlowPaint)
-            canvas.drawCircle(-146f, -16f, 3.0f, drlPaint)
+            canvas.drawCircle(-160f, 0f, 9f, drlGlowPaint)
+            canvas.drawCircle(-160f, 0f, 3.5f, drlPaint)
 
             // Right taillight fixture
             val tailAlpha = (160 + (95 * pulse)).toInt().coerceIn(0, 255)
             tailPaint.alpha = tailAlpha
             tailGlowPaint.alpha = (95 * pulse).toInt().coerceIn(0, 255)
-            canvas.drawCircle(146f, -16f, 7f, tailGlowPaint)
-            canvas.drawCircle(146f, -16f, 2.5f, tailPaint)
+            canvas.drawCircle(160f, -6f, 8f, tailGlowPaint)
+            canvas.drawCircle(160f, -6f, 3f, tailPaint)
         } else {
             // Fallback Vector Rendering if bitmap not loaded
             val bodyPath = Path().apply {
@@ -402,12 +402,12 @@ class Mx5RenderView @JvmOverloads constructor(
         if (screenTitle.isNotEmpty()) {
             val titleAlpha = (170 + (85 * pulse)).toInt().coerceIn(0, 255)
             textPaint.alpha = titleAlpha
-            canvas.drawText(screenTitle, cx, cy + (58f * scale), textPaint)
+            canvas.drawText(screenTitle, cx, cy + (76f * scale), textPaint)
 
             dotPaint.alpha = titleAlpha
             val titleHalfW = (textPaint.measureText(screenTitle) / 2f)
-            canvas.drawCircle(cx - titleHalfW - (12f * scale), cy + (54f * scale), 3.5f * scale, dotPaint)
-            canvas.drawCircle(cx + titleHalfW + (12f * scale), cy + (54f * scale), 3.5f * scale, dotPaint)
+            canvas.drawCircle(cx - titleHalfW - (14f * scale), cy + (72f * scale), 3.5f * scale, dotPaint)
+            canvas.drawCircle(cx + titleHalfW + (14f * scale), cy + (72f * scale), 3.5f * scale, dotPaint)
         }
     }
 
