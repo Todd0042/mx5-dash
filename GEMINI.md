@@ -14,25 +14,27 @@ Whenever you are about to utilize, apply, or enforce any rule or constraint defi
 
 ---
 
-## Rule 2: Strict Dual-Platform Parity & Screen Index Synchronization
-The ESP32-S3 firmware (C++/LVGL/FreeRTOS) and the Android application (Kotlin/C++/NDK/LVGL) must maintain **100% feature, UI, and behavioral parity**.
-- **Screen Carousel Order (0..6)**:
-  - `0`: **`SCREEN_SPEED`** (Hero Speedometer, RPM, Fuel Level)
-  - `1`: **`SCREEN_TPMS`** (4-Corner Tire Pressures & Temperatures)
-  - `2`: **`SCREEN_TEMPS`** (Coolant Temp, Oil Temp, Intake Air Temp, Battery Volts)
-  - `3`: **`SCREEN_DIAG`** (Diagnostic Hub, DTC Fault Codes, Fuel Trims)
-  - `4`: **`SCREEN_TRACK` / "FAFO"** (0-60 MPH Timer, Horsepower, Torque, Braking Dynamics)
-  - `5`: **`SCREEN_RPM`** (High-Refresh Engine Tachometer)
-  - `6`: **`SCREEN_TRIP`** (Trip Distance, Average & Instantaneous MPG, Range)
-  - `7`: **`SCREEN_MENU`** (Swipe-Up Quick Launcher)
-  - `8..12`: **Diagnostic Sub-Dashboards** (Fuel Trims, Misfires, Chassis, I/M Smog, Incident Logs)
-- All screen additions, re-ordering, or navigation changes must be updated simultaneously across:
-  - `lib/mx5_ui/Mx5UI.h` & `lib/mx5_ui/Mx5UI.cpp`
-  - `OBD2Android/app/src/main/cpp/android_ui/AndroidMx5UI.h` & `AndroidMx5UI.cpp`
-  - `OBD2Android/app/src/main/java/com/mx5dash/obd2android/ui/Mx5RenderView.kt`
-  - `OBD2Android/app/src/main/java/com/mx5dash/obd2android/bluetooth/BluetoothSerialManager.kt`
-  - `lib/obd_ble/ObdService.cpp`
-  - `src/sim_main.cpp`
+## Rule 2: Harmonized Dual-Platform User Experience & Form-Factor Adaptation
+The ESP32-S3 dedicated instrument display and the Android companion application are fundamentally different hardware architectures (differing in physical screen dimensions, aspect ratios, and Bluetooth connection stacks). They must deliver a **harmonized, seamless user experience** that is as similar as possible while appropriately adapting to each hardware platform:
+- **Display Geometry & Layout Adaptation**:
+  - **ESP32-S3 3.5" Panel**: 480×320 (3:2 aspect ratio), compact dedicated dashboard display rendered via FreeRTOS / LVGL.
+  - **Android Companion App**: Modern smartphone widescreen format (e.g. 19.5:9 / 20:9), rendered via Android NDK / LVGL + Kotlin.
+  - Layouts, widget margins, and arc radii should naturally adapt to the respective aspect ratio without awkward clipping or squishing, while maintaining consistent typography, colors (Mazda OEM red/amber/dark palette), and gauge styling.
+- **Connection Stack Independence**:
+  - **ESP32-S3**: Communicates over Bluetooth Low Energy (BLE 5.0 / NimBLE) on Core 0.
+  - **Android**: Communicates over Bluetooth Classic RFCOMM (SPP) with foreground service persistence.
+- **Logical Feature & Navigation Alignment**:
+  - Both platforms share the identical screen carousel sequence:
+    - `0`: **`SCREEN_SPEED`** (Hero Speedometer, RPM, Fuel Level)
+    - `1`: **`SCREEN_TPMS`** (4-Corner Tire Pressures & Temperatures)
+    - `2`: **`SCREEN_TEMPS`** (Coolant Temp, Oil Temp, Intake Air Temp, Battery Volts)
+    - `3`: **`SCREEN_DIAG`** (Diagnostic Hub, DTC Fault Codes, Fuel Trims)
+    - `4`: **`SCREEN_TRACK` / "FAFO"** (0-60 MPH Timer, Horsepower, Torque, Braking Dynamics)
+    - `5`: **`SCREEN_RPM`** (High-Refresh Engine Tachometer)
+    - `6`: **`SCREEN_TRIP`** (Trip Distance, Average & Instantaneous MPG, Range)
+    - `7`: **`SCREEN_MENU`** (Swipe-Up Quick Launcher)
+    - `8..12`: **Diagnostic Sub-Dashboards** (Fuel Trims, Misfires, Chassis, I/M Smog, Incident Logs)
+  - Both platforms share the same transmission state machine (`trans_auto`), PRND decoding, and telemetry math.
 
 ---
 
