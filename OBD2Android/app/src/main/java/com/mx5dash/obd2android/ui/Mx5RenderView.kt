@@ -137,11 +137,25 @@ class Mx5RenderView @JvmOverloads constructor(
         style = Paint.Style.FILL
     }
 
+    private var carLeftBitmap: Bitmap? = null
+    private var carRightBitmap: Bitmap? = null
+
     private val app get() = context.applicationContext as? Mx5Application
 
     init {
         holder.addCallback(this)
         isFocusable = true
+
+        try {
+            context.assets.open("mx5_rf_side_left.png").use { stream ->
+                carLeftBitmap = android.graphics.BitmapFactory.decodeStream(stream)
+            }
+            context.assets.open("mx5_rf_side_right.png").use { stream ->
+                carRightBitmap = android.graphics.BitmapFactory.decodeStream(stream)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("Mx5RenderView", "Could not load side car assets: ${e.message}")
+        }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -303,71 +317,84 @@ class Mx5RenderView @JvmOverloads constructor(
         canvas.translate(cx, cy)
         canvas.scale(scale, scale)
 
-        // If facing right, mirror horizontally around vehicle center
-        if (!isFacingLeft) {
-            canvas.scale(-1f, 1f)
+        val carBitmap = if (isFacingLeft) carLeftBitmap else carRightBitmap
+        if (carBitmap != null) {
+            val carW = 340f
+            val carH = (carW * carBitmap.height / carBitmap.width)
+            val dstLeft = -carW / 2f
+            val dstTop = (-carH / 2f) - 6f
+            tempRect.set(dstLeft, dstTop, dstLeft + carW, dstTop + carH)
+            canvas.drawBitmap(carBitmap, null, tempRect, paint)
+
+            // Pulsing Headlight & Taillight Glow overlays
+            val drlAlpha = (140 + (115 * pulse)).toInt().coerceIn(0, 255)
+            drlPaint.alpha = drlAlpha
+            drlGlowPaint.alpha = (90 * pulse).toInt().coerceIn(0, 255)
+            // Left headlight fixture
+            canvas.drawCircle(-146f, -16f, 8f, drlGlowPaint)
+            canvas.drawCircle(-146f, -16f, 3.0f, drlPaint)
+
+            // Right taillight fixture
+            val tailAlpha = (160 + (95 * pulse)).toInt().coerceIn(0, 255)
+            tailPaint.alpha = tailAlpha
+            tailGlowPaint.alpha = (95 * pulse).toInt().coerceIn(0, 255)
+            canvas.drawCircle(146f, -16f, 7f, tailGlowPaint)
+            canvas.drawCircle(146f, -16f, 2.5f, tailPaint)
+        } else {
+            // Fallback Vector Rendering if bitmap not loaded
+            val bodyPath = Path().apply {
+                moveTo(-110f, 20f)
+                lineTo(-106f, 10f)
+                quadTo(-102f, 4f, -80f, 3f)
+                quadTo(-48f, 1f, -34f, -3f)
+                lineTo(-12f, -26f)
+                quadTo(10f, -28f, 26f, -26f)
+                quadTo(54f, -8f, 70f, 4f)
+                lineTo(96f, 6f)
+                lineTo(106f, 10f)
+                lineTo(102f, 20f)
+                lineTo(82f, 22f)
+                arcTo(46f, 6f, 82f, 42f, 0f, -180f, false)
+                lineTo(-46f, 22f)
+                arcTo(-82f, 6f, -46f, 42f, 0f, -180f, false)
+                lineTo(-110f, 20f)
+                close()
+            }
+            canvas.drawPath(bodyPath, carBodyPaint)
+            canvas.drawPath(bodyPath, carOutlinePaint)
+
+            val sillPath = Path().apply {
+                moveTo(-44f, 21f)
+                lineTo(44f, 21f)
+            }
+            canvas.drawPath(sillPath, carSillPaint)
+
+            val windowPath = Path().apply {
+                moveTo(-30f, -2f)
+                lineTo(-10f, -23f)
+                quadTo(8f, -24f, 22f, -22f)
+                quadTo(42f, -8f, 52f, 0f)
+                lineTo(-30f, 0f)
+                close()
+            }
+            canvas.drawPath(windowPath, carWindowPaint)
+            canvas.drawPath(windowPath, carWindowTrimPaint)
+
+            drawWheel(canvas, -64f, 22f)
+            drawWheel(canvas, 64f, 22f)
+
+            val drlAlpha = (160 + (95 * pulse)).toInt().coerceIn(0, 255)
+            drlPaint.alpha = drlAlpha
+            drlGlowPaint.alpha = (85 * pulse).toInt().coerceIn(0, 255)
+            canvas.drawCircle(-100f, 6f, 9f, drlGlowPaint)
+            canvas.drawCircle(-100f, 6f, 3.5f, drlPaint)
+
+            val tailAlpha = (180 + (75 * pulse)).toInt().coerceIn(0, 255)
+            tailPaint.alpha = tailAlpha
+            tailGlowPaint.alpha = (90 * pulse).toInt().coerceIn(0, 255)
+            canvas.drawCircle(100f, 7f, 8f, tailGlowPaint)
+            canvas.drawCircle(100f, 7f, 3f, tailPaint)
         }
-
-        // 1. Mazda MX-5 ND2 RF Silhouette Body Path (Facing Left)
-        val bodyPath = Path().apply {
-            moveTo(-110f, 20f)                       // Front splitter
-            lineTo(-106f, 10f)                       // Front bumper
-            quadTo(-102f, 4f, -80f, 3f)              // Swept low nose
-            quadTo(-48f, 1f, -34f, -3f)              // Long sleek hood
-            lineTo(-12f, -26f)                       // Steep windshield
-            quadTo(10f, -28f, 26f, -26f)             // Targa roof peak
-            quadTo(54f, -8f, 70f, 4f)                // Fastback rear buttress
-            lineTo(96f, 6f)                          // Rear deck
-            lineTo(106f, 10f)                        // Ducktail lip
-            lineTo(102f, 20f)                        // Rear bumper
-            lineTo(82f, 22f)                         // Rear underbody
-            arcTo(46f, 6f, 82f, 42f, 0f, -180f, false) // Rear wheel arch
-            lineTo(-46f, 22f)                        // Rocker sill
-            arcTo(-82f, 6f, -46f, 42f, 0f, -180f, false) // Front wheel arch
-            lineTo(-110f, 20f)                       // Front undertray
-            close()
-        }
-
-        // Draw Shadow Body & Satin Chrome Outline
-        canvas.drawPath(bodyPath, carBodyPaint)
-        canvas.drawPath(bodyPath, carOutlinePaint)
-
-        // Soul Red Rocker Sill Accent Line
-        val sillPath = Path().apply {
-            moveTo(-44f, 21f)
-            lineTo(44f, 21f)
-        }
-        canvas.drawPath(sillPath, carSillPaint)
-
-        // Side Greenhouse / Tinted Window
-        val windowPath = Path().apply {
-            moveTo(-30f, -2f)
-            lineTo(-10f, -23f)
-            quadTo(8f, -24f, 22f, -22f)
-            quadTo(42f, -8f, 52f, 0f)
-            lineTo(-30f, 0f)
-            close()
-        }
-        canvas.drawPath(windowPath, carWindowPaint)
-        canvas.drawPath(windowPath, carWindowTrimPaint)
-
-        // Wheels
-        drawWheel(canvas, -64f, 22f)
-        drawWheel(canvas, 64f, 22f)
-
-        // Amber DRL Headlamp (Front Left) with pulsating glow
-        val drlAlpha = (160 + (95 * pulse)).toInt().coerceIn(0, 255)
-        drlPaint.alpha = drlAlpha
-        drlGlowPaint.alpha = (85 * pulse).toInt().coerceIn(0, 255)
-        canvas.drawCircle(-100f, 6f, 9f, drlGlowPaint)
-        canvas.drawCircle(-100f, 6f, 3.5f, drlPaint)
-
-        // Soul Red LED Taillight Blade (Rear Right) with pulsating glow
-        val tailAlpha = (180 + (75 * pulse)).toInt().coerceIn(0, 255)
-        tailPaint.alpha = tailAlpha
-        tailGlowPaint.alpha = (90 * pulse).toInt().coerceIn(0, 255)
-        canvas.drawCircle(100f, 7f, 8f, tailGlowPaint)
-        canvas.drawCircle(100f, 7f, 3f, tailPaint)
 
         canvas.restore()
 
