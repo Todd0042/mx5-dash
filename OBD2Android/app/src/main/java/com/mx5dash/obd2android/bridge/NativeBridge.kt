@@ -12,6 +12,7 @@ object NativeBridge {
     external fun nativePrev()
     external fun nativeToggleMenu()
     external fun nativeSetScreen(index: Int)
+    external fun nativeGetCurrentScreen(): Int
     external fun nativeSetThemeMode(mode: Int)
     external fun nativeSetNightMode(isNight: Boolean)
 

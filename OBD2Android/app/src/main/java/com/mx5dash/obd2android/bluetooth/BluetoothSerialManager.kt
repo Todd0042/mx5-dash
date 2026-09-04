@@ -33,9 +33,15 @@ class BluetoothSerialManager(
         )
     }
 
+    // Volatile thread-safe state shared with UI
+    @Volatile var currentActiveScreen: Int = 0
+    @Volatile var targetTransitionScreen: Int = -1
+    @Volatile var isFreshPayloadReady: Boolean = false
+
     private val running = AtomicBoolean(false)
     private var workerThread: Thread? = null
     private var socket: BluetoothSocket? = null
+    private var consecutiveFailures = 0
 
     val isConnected: Boolean
         get() = (socket?.isConnected == true)
@@ -44,7 +50,6 @@ class BluetoothSerialManager(
 
     fun addConnectionListener(listener: (Boolean, String) -> Unit) {
         connectionListeners.add(listener)
-        // If already connected, immediately notify current state
         if (isConnected) {
             listener(true, socket?.remoteDevice?.name ?: "OBD-II Scanner")
         }
@@ -67,18 +72,18 @@ class BluetoothSerialManager(
         }
     }
 
-    // Live Vehicle State
+    // Retained Live Vehicle State (Freeze-Protected: Never reset on dropped packets)
     private var liveRpm = 0
     private var liveSpeedKmh = 0
-    private var liveCoolantC = 85
-    private var liveOilTempC = 90
-    private var liveIntakeC = 25
+    private var liveCoolantC = 88
+    private var liveOilTempC = 92
+    private var liveIntakeC = 24
     private var liveAmbientC = 22
     private var liveBatVolts = 14.2f
     private var liveEngineLoadPct = 0
     private var liveThrottlePct = 0
     private var liveFuelLevelPct = 50
-    private var liveGear = 'N'
+    private var liveGear = '-'
     private var liveBrakePct = 0
     private var liveHp = 0
     private var liveTorque = 0
@@ -96,21 +101,21 @@ class BluetoothSerialManager(
     private var liveRailPressurePsi = 500
     private var liveSparkAdvance = 14.0f
     private var liveKnockRetard = 0.0f
-    private var lastTpmsCheckMs = 0L
 
     // TPMS
     private var flPsi = 32.0f
     private var frPsi = 32.0f
     private var rlPsi = 32.0f
     private var rrPsi = 32.0f
-    private var flTemp = 25.0f
-    private var frTemp = 25.0f
-    private var rlTemp = 25.0f
-    private var rrTemp = 25.0f
+    private var flTemp = 24.0f
+    private var frTemp = 24.0f
+    private var rlTemp = 24.0f
+    private var rrTemp = 24.0f
 
     // Dynamic Braking Tracking
     private var lastSpeedKmh = 0
     private var lastSpeedTimeMs = System.currentTimeMillis()
+    private var lastSafetySweepMs = 0L
 
     @SuppressLint("MissingPermission")
     fun start() {
@@ -126,7 +131,7 @@ class BluetoothSerialManager(
                     val device = findTargetDevice()
                     if (device == null) {
                         notifyConnectionState(false, "SEARCHING FOR OBD-II SCANNER…")
-                        Thread.sleep(2500)
+                        Thread.sleep(2000)
                         continue
                     }
 
@@ -137,25 +142,42 @@ class BluetoothSerialManager(
                     socket = sock
                     sock.connect()
 
+                    consecutiveFailures = 0
                     telemetrySimulator.stop()
                     notifyConnectionState(true, device.name ?: "OBD-II Scanner")
-                    Log.i(TAG, "Connected to ${device.name}! Starting live telemetry polling.")
+                    Log.i(TAG, "Connected to ${device.name}! Starting view-driven telemetry loop.")
 
                     runPollingLoop(sock)
 
                 } catch (e: Exception) {
-                    Log.w(TAG, "Bluetooth connection error: ${e.message}")
-                    notifyConnectionState(false, "SEARCHING FOR OBD-II SCANNER…")
-                    telemetrySimulator.start()
-                    try { socket?.close() } catch (_: Exception) {}
-                    socket = null
-                    if (running.get()) Thread.sleep(3000)
+                    Log.w(TAG, "Bluetooth connection dropped or failed: ${e.message}")
+                    attemptSilentSocketReconnect()
                 }
             }
             dataLogger.stopSession()
         }, "obd-rfcomm-worker").apply {
             isDaemon = true
             start()
+        }
+    }
+
+    private fun attemptSilentSocketReconnect() {
+        try { socket?.close() } catch (_: Exception) {}
+        socket = null
+
+        consecutiveFailures++
+        // Exponential backoff: 1s, 2s, 4s, 8s, up to 10s max
+        val backoffMs = min(10000L, 1000L * (1L shl min(consecutiveFailures - 1, 3)))
+        Log.e(TAG, "Serial connection error. Silent backoff delay: ${backoffMs}ms (attempt $consecutiveFailures)...")
+        notifyConnectionState(false, "RECONNECTING TO OBD-II SCANNER…")
+        telemetrySimulator.start()
+
+        if (running.get()) {
+            try {
+                Thread.sleep(backoffMs)
+            } catch (_: InterruptedException) {
+                // Thread interrupted
+            }
         }
     }
 
@@ -174,277 +196,386 @@ class BluetoothSerialManager(
         return null
     }
 
-    private fun runPollingLoop(sock: BluetoothSocket) {
-        val reader = BufferedReader(InputStreamReader(sock.inputStream))
-        val output = sock.outputStream
+    /**
+     * Non-blocking OBD command sender with guaranteed 200ms socket timeout protection.
+     * Prevents thread stalls on lost or truncated Bluetooth packets.
+     */
+    private fun sendObdCommand(
+        output: OutputStream,
+        input: java.io.InputStream,
+        cmd: String,
+        timeoutMs: Long = 180L
+    ): String {
+        // Drain any stale residual bytes before writing
+        while (input.available() > 0) {
+            input.read()
+        }
 
-        fun sendCmd(cmd: String, timeoutMs: Long = 250): String {
-            try {
-                output.write("$cmd\r".toByteArray())
-                output.flush()
-                val sb = StringBuilder()
-                val t0 = System.currentTimeMillis()
-                while (System.currentTimeMillis() - t0 < timeoutMs) {
-                    if (reader.ready()) {
-                        val c = reader.read()
-                        if (c == -1 || c == '>'.code) break
-                        sb.append(c.toChar())
-                    } else {
-                        Thread.sleep(2)
+        output.write("$cmd\r".toByteArray(Charsets.US_ASCII))
+        output.flush()
+
+        val sb = StringBuilder()
+        val start = System.currentTimeMillis()
+        val byteBuf = ByteArray(64)
+
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            val avail = input.available()
+            if (avail > 0) {
+                val toRead = min(avail, byteBuf.size)
+                val readCount = input.read(byteBuf, 0, toRead)
+                if (readCount > 0) {
+                    for (i in 0 until readCount) {
+                        val ch = byteBuf[i].toInt().toChar()
+                        if (ch == '>') {
+                            return sb.toString().trim()
+                        }
+                        if (ch != '\r' && ch != '\n' && ch != '\u0000') {
+                            sb.append(ch)
+                        }
                     }
                 }
-                return sb.toString().trim()
-            } catch (e: Exception) {
-                return ""
+            } else {
+                Thread.sleep(3) // Yield CPU to avoid battery drain
             }
         }
+        return sb.toString().trim()
+    }
 
-        fun parseHexBytes(resp: String, prefix: String): List<Int> {
-            val clean = resp.replace(" ", "").replace("\r", "").replace("\n", "").uppercase()
-            val idx = clean.indexOf(prefix.uppercase())
-            if (idx == -1) return emptyList()
-            val dataStr = clean.substring(idx + prefix.length)
-            val bytes = mutableListOf<Int>()
-            var i = 0
-            while (i + 1 < dataStr.length) {
-                val byteVal = dataStr.substring(i, i + 2).toIntOrNull(16) ?: break
-                bytes.add(byteVal)
-                i += 2
-            }
-            return bytes
+    private fun parseHexBytes(resp: String, prefix: String): List<Int> {
+        val clean = resp.replace(" ", "").replace("\r", "").replace("\n", "").uppercase()
+        val idx = clean.indexOf(prefix.uppercase())
+        if (idx == -1) return emptyList()
+        val dataStr = clean.substring(idx + prefix.length)
+        val bytes = mutableListOf<Int>()
+        var i = 0
+        while (i + 1 < dataStr.length) {
+            val byteVal = dataStr.substring(i, i + 2).toIntOrNull(16) ?: break
+            bytes.add(byteVal)
+            i += 2
         }
+        return bytes
+    }
 
-        // Initialize ELM327 protocol with aggressive CAN throughput settings
-        sendCmd("ATZ", 800)
-        sendCmd("ATE0", 200)
-        sendCmd("ATL0", 200)
-        sendCmd("ATH0", 200)
-        sendCmd("ATS0", 200)
-        sendCmd("ATAT2", 200)  // Fast adaptive timing
-        sendCmd("ATST14", 200) // 80ms timeout to avoid hanging
-        sendCmd("ATSP0", 600)  // Auto protocol (ISO 15765-4 CAN 500k)
+    private fun runPollingLoop(sock: BluetoothSocket) {
+        val input = sock.inputStream
+        val output = sock.outputStream
 
-        var cycleIndex = 0
+        // Initialize ELM327 protocol with fast CAN throughput
+        sendObdCommand(output, input, "ATZ", 600)
+        sendObdCommand(output, input, "ATE0", 150)
+        sendObdCommand(output, input, "ATL0", 150)
+        sendObdCommand(output, input, "ATH0", 150)
+        sendObdCommand(output, input, "ATS0", 150)
+        sendObdCommand(output, input, "ATAT2", 150)  // Fast adaptive timing
+        sendObdCommand(output, input, "ATST14", 150) // 80ms timeout
+        sendObdCommand(output, input, "ATSP0", 500)  // Auto protocol (ISO 15765-4 CAN 500k)
+
+        var screenTick = 0
 
         while (running.get() && sock.isConnected) {
             val nowMs = System.currentTimeMillis()
 
             // ================================================================
-            // PRIORITY 1: ALWAYS POLL SPEED (100% Constant Live Speed ~35-45 Hz)
+            // 1. ALWAYS POLL HIGH-PRIORITY: Vehicle Speed (Mode 010D)
             // ================================================================
-            val spdResp = sendCmd("010D", 80)
+            val spdResp = sendObdCommand(output, input, "010D", 90)
             val spdBytes = parseHexBytes(spdResp, "410D")
             if (spdBytes.isNotEmpty()) {
                 liveSpeedKmh = spdBytes[0]
             }
 
+            // Mandatory thread throttle yield (35ms) to conserve phone battery & prevent vLinker buffer overrun
+            Thread.sleep(35)
+
             // ================================================================
-            // PRIORITY 2: STAGGERED AUXILIARY POLLING (1 metric per Speed tick)
+            // 2. VIEW-DRIVEN SCREEN-SPECIFIC COMMAND QUEUE
             // ================================================================
-            cycleIndex = (cycleIndex + 1) % 32
+            val activeScreen = if (targetTransitionScreen >= 0) targetTransitionScreen else currentActiveScreen
+            screenTick = (screenTick + 1) % 16
 
-            when (cycleIndex) {
-                // High-frequency RPM (~20 Hz)
-                0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30 -> {
-                    val rpmResp = sendCmd("010C", 80)
-                    val rpmBytes = parseHexBytes(rpmResp, "410C")
-                    if (rpmBytes.size >= 2) {
-                        liveRpm = ((rpmBytes[0] * 256) + rpmBytes[1]) / 4
-                    }
-                }
-                // Throttle Position %
-                1, 9, 17, 25 -> {
-                    val thrResp = sendCmd("0111", 80)
-                    val thrBytes = parseHexBytes(thrResp, "4111")
-                    if (thrBytes.isNotEmpty()) {
-                        liveThrottlePct = (thrBytes[0] * 100) / 255
-                    }
-                }
-                // Calculated Engine Load %
-                3, 19 -> {
-                    val loadResp = sendCmd("0104", 80)
-                    val loadBytes = parseHexBytes(loadResp, "4104")
-                    if (loadBytes.isNotEmpty()) {
-                        liveEngineLoadPct = (loadBytes[0] * 100) / 255
-                    }
-                }
-                // Coolant Temp °C
-                5, 21 -> {
-                    val coolResp = sendCmd("0105", 80)
-                    val coolBytes = parseHexBytes(coolResp, "4105")
-                    if (coolBytes.isNotEmpty()) {
-                        liveCoolantC = coolBytes[0] - 40
-                    }
-                }
-                // Intake Air Temp °C (and Ambient baseline)
-                7 -> {
-                    val iatResp = sendCmd("010F", 80)
-                    val iatBytes = parseHexBytes(iatResp, "410F")
-                    if (iatBytes.isNotEmpty()) {
-                        liveIntakeC = iatBytes[0] - 40
-                        liveAmbientC = liveIntakeC
-                    }
-                }
-                // Battery Voltage via Hardware ATRV
-                11 -> {
-                    val atrvResp = sendCmd("ATRV", 60)
-                    val vVal = atrvResp.replace("V", "").replace("v", "").trim().toFloatOrNull()
-                    if (vVal != null && vVal > 5f) {
-                        liveBatVolts = vVal
-                    }
-                }
-                // Short Term & Long Term Fuel Trims
-                13 -> {
-                    val stftResp = sendCmd("0106", 80)
-                    val stftBytes = parseHexBytes(stftResp, "4106")
-                    if (stftBytes.isNotEmpty()) liveStft = ((stftBytes[0] - 128) * 100f) / 128f
-
-                    val ltftResp = sendCmd("0108", 80)
-                    val ltftBytes = parseHexBytes(ltftResp, "4108")
-                    if (ltftBytes.isNotEmpty()) liveLtft = ((ltftBytes[0] - 128) * 100f) / 128f
-                }
-                // Direct Injection Fuel Rail Pressure (HPFP)
-                15 -> {
-                    val frpResp = sendCmd("0123", 80)
-                    val frpBytes = parseHexBytes(frpResp, "4123")
-                    if (frpBytes.size >= 2) {
-                        val kpa = ((frpBytes[0] * 256) + frpBytes[1]) * 10
-                        liveRailPressurePsi = (kpa * 0.145038f).toInt()
-                    }
-                }
-                // Wideband Lambda / Air-Fuel Ratio (AFR)
-                23 -> {
-                    val afrResp = sendCmd("0124", 80)
-                    val afrBytes = parseHexBytes(afrResp, "4124")
-                    if (afrBytes.size >= 2) {
-                        val lambda = ((afrBytes[0] * 256) + afrBytes[1]) / 32768.0f
-                        liveAfr = lambda * 14.7f
-                    }
-                }
-                // Ignition Timing Advance
-                27 -> {
-                    val timResp = sendCmd("010E", 80)
-                    val timBytes = parseHexBytes(timResp, "410E")
-                    if (timBytes.isNotEmpty()) {
-                        liveSparkAdvance = (timBytes[0] / 2.0f) - 64.0f
-                    }
-                }
-                // SkyActiv Engine Oil Temperature DID
-                29 -> {
-                    val oilResp = sendCmd("221310", 100)
-                    val oilBytes = parseHexBytes(oilResp, "621310")
-                    if (oilBytes.isNotEmpty()) {
-                        liveOilTempC = oilBytes[0] - 40
-                    }
-                }
-                // Background TPMS & Cluster Fuel check (every 25 seconds)
-                31 -> {
-                    if (nowMs - lastTpmsCheckMs > 25000L) {
-                        lastTpmsCheckMs = nowMs
-                        // Switch header to Instrument Cluster / BCM
-                        sendCmd("ATSH 720", 100)
-
-                        val p0Resp = sendCmd("222A05", 100)
-                        val p0Bytes = parseHexBytes(p0Resp, "622A05")
-                        if (p0Bytes.isNotEmpty()) flPsi = ((p0Bytes[0] * 1373f) / 1000f) * 0.145038f
-
-                        val p1Resp = sendCmd("222A06", 100)
-                        val p1Bytes = parseHexBytes(p1Resp, "622A06")
-                        if (p1Bytes.isNotEmpty()) frPsi = ((p1Bytes[0] * 1373f) / 1000f) * 0.145038f
-
-                        val p2Resp = sendCmd("222A07", 100)
-                        val p2Bytes = parseHexBytes(p2Resp, "622A07")
-                        if (p2Bytes.isNotEmpty()) rlPsi = ((p2Bytes[0] * 1373f) / 1000f) * 0.145038f
-
-                        val p3Resp = sendCmd("222A08", 100)
-                        val p3Bytes = parseHexBytes(p3Resp, "622A08")
-                        if (p3Bytes.isNotEmpty()) rrPsi = ((p3Bytes[0] * 1373f) / 1000f) * 0.145038f
-
-                        // Cluster Fuel Level
-                        val fuelResp = sendCmd("222A26", 100)
-                        val fuelBytes = parseHexBytes(fuelResp, "622A26")
-                        if (fuelBytes.isNotEmpty()) liveFuelLevelPct = (fuelBytes[0] * 100) / 255
-
-                        // Restore header to Engine PCM
-                        sendCmd("ATSH 7E0", 100)
-                    }
-                }
-            }
-
-            // Real ND2 Gear Calculation
-            liveGear = when {
-                liveRpm == 0 && liveSpeedKmh == 0 -> '-'
-                liveSpeedKmh < 3 -> if (liveRpm > 400) 'N' else '-'
-                else -> {
-                    val r = liveRpm.toFloat() / max(1f, liveSpeedKmh.toFloat())
-                    when {
-                        r < 35.0f -> '6'
-                        r < 45.0f -> '5'
-                        r < 56.0f -> '4'
-                        r < 77.0f -> '3'
-                        r < 125.0f -> '2'
-                        else -> '1'
-                    }
-                }
-            }
-
-            // Real Engine Dynamics Output
-            liveHp = min(181, ((liveRpm / 7500.0f) * 181.0f * (liveThrottlePct / 100.0f)).toInt())
-            liveTorque = min(151, (151.0f * (liveEngineLoadPct / 100.0f)).toInt())
-
-            // Organic Dynamic Deceleration Braking
-            val dtSec = max(0.02f, (nowMs - lastSpeedTimeMs) / 1000.0f)
-            val dSpeedMps = (liveSpeedKmh - lastSpeedKmh) * (1000.0f / 3600.0f)
-            val accelMps2 = dSpeedMps / dtSec
-            lastSpeedKmh = liveSpeedKmh
-            lastSpeedTimeMs = nowMs
-
-            if (accelMps2 < -0.6f && liveThrottlePct < 5) {
-                // Deceleration under braking: ~7.0 m/s^2 is firm braking (100%)
-                liveBrakePct = min(100, max(0, ((-accelMps2 / 6.5f) * 100.0f).toInt()))
+            // Check 30-Second Safety Warning Sweep (TPMS + Critical Overheat)
+            if (nowMs - lastSafetySweepMs > 30000L && activeScreen != 1) { // 1 = SCREEN_TPMS
+                lastSafetySweepMs = nowMs
+                executeSafetySweep(output, input)
             } else {
-                liveBrakePct = 0
+                executeScreenQueue(output, input, activeScreen, screenTick)
             }
 
-            // Real Acceleration Timer
-            if (liveSpeedKmh == 0) {
-                timerState = 0
-                accel0to60 = 0.0f
-            } else if (liveSpeedKmh in 1..96) {
-                if (timerState == 0) {
-                    timerStartMs = nowMs
-                    timerState = 1
-                }
-                accel0to60 = (nowMs - timerStartMs) / 1000.0f
-            } else if (liveSpeedKmh >= 97 && timerState == 1) {
-                timerState = 2
-                accel0to60 = (nowMs - timerStartMs) / 1000.0f
-                if (accel0to60 in 3.0f..15.0f && (best0to60 == 0f || accel0to60 < best0to60)) {
-                    best0to60 = accel0to60
-                }
+            // Signal fresh payload ready if a transition was holding for data
+            if (targetTransitionScreen >= 0 && !isFreshPayloadReady) {
+                isFreshPayloadReady = true
             }
 
-            val instantMpg = if (liveSpeedKmh > 5) {
-                min(60.0f, max(0.0f, (liveSpeedKmh * 0.621371f) / max(0.1f, (liveEngineLoadPct * 0.04f))))
-            } else 0.0f
-
-            val rangeMiles = (liveFuelLevelPct * 4.2f).toInt()
-
-            // Update NDK Engine Frame with all live powertrain telemetry
-            NativeBridge.nativeUpdateFullTelemetry(
-                liveRpm, liveSpeedKmh, liveCoolantC, liveOilTempC, liveIntakeC, liveAmbientC,
-                liveBatVolts, liveEngineLoadPct, liveThrottlePct, liveFuelLevelPct,
-                liveGear, liveBrakePct, liveHp, liveTorque,
-                accel0to60, best0to60, timerState,
-                instantMpg, 32.8f, 0.0f, rangeMiles,
-                liveAfr, liveStft, liveLtft, liveKnockRetard, liveRailPressurePsi,
-                liveSparkAdvance, 0.0f, 0.0f,
-                liveOilTempC - 10, 0, 0.0f,
-                flPsi, frPsi, rlPsi, rrPsi,
-                flTemp, frTemp, rlTemp, rrTemp,
-                0, false, true
-            )
+            // ================================================================
+            // 3. TELEMETRY MATH & SNAPSHOT PUSH (RETAINS LAST VALID VALUES)
+            // ================================================================
+            pushTelemetrySnapshot(nowMs)
         }
+    }
+
+    private fun executeScreenQueue(
+        output: OutputStream,
+        input: java.io.InputStream,
+        screen: Int,
+        tick: Int
+    ) {
+        when (screen) {
+            // Screen 0: Hero Speedometer -> RPM, Fuel %, Ambient Temp
+            0 -> {
+                when (tick % 3) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "010C", 80)
+                        val bytes = parseHexBytes(resp, "410C")
+                        if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "012F", 80)
+                        val bytes = parseHexBytes(resp, "412F")
+                        if (bytes.isNotEmpty()) liveFuelLevelPct = (bytes[0] * 100) / 255
+                    }
+                    2 -> {
+                        // Ambient Air Temp with strict sanity checking (-40°C to +55°C)
+                        val resp = sendObdCommand(output, input, "0146", 80)
+                        val bytes = parseHexBytes(resp, "4146")
+                        if (bytes.isNotEmpty()) {
+                            val temp = bytes[0] - 40
+                            if (temp in -40..55) {
+                                liveAmbientC = temp
+                            }
+                        }
+                    }
+                }
+            }
+            // Screen 1: TPMS -> 4-Corner Pressure & Temp via BCM (Header 720)
+            1 -> {
+                sendObdCommand(output, input, "ATSH 720", 90)
+                val p0 = parseHexBytes(sendObdCommand(output, input, "222A05", 90), "622A05")
+                if (p0.isNotEmpty()) {
+                    flPsi = ((p0[0] * 1373f) / 1000f) * 0.145038f
+                    if (p0.size >= 2) flTemp = (p0[1] - 40).toFloat()
+                }
+
+                val p1 = parseHexBytes(sendObdCommand(output, input, "222A06", 90), "622A06")
+                if (p1.isNotEmpty()) {
+                    frPsi = ((p1[0] * 1373f) / 1000f) * 0.145038f
+                    if (p1.size >= 2) frTemp = (p1[1] - 40).toFloat()
+                }
+
+                val p2 = parseHexBytes(sendObdCommand(output, input, "222A07", 90), "622A07")
+                if (p2.isNotEmpty()) {
+                    rlPsi = ((p2[0] * 1373f) / 1000f) * 0.145038f
+                    if (p2.size >= 2) rlTemp = (p2[1] - 40).toFloat()
+                }
+
+                val p3 = parseHexBytes(sendObdCommand(output, input, "222A08", 90), "622A08")
+                if (p3.isNotEmpty()) {
+                    rrPsi = ((p3[0] * 1373f) / 1000f) * 0.145038f
+                    if (p3.size >= 2) rrTemp = (p3[1] - 40).toFloat()
+                }
+                sendObdCommand(output, input, "ATSH 7E0", 90)
+            }
+            // Screen 2: Engine Tachometer -> High-rate RPM, Load %, Throttle %, Battery Volts
+            2 -> {
+                when (tick % 4) {
+                    0, 2 -> {
+                        val resp = sendObdCommand(output, input, "010C", 80)
+                        val bytes = parseHexBytes(resp, "410C")
+                        if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "0104", 80)
+                        val bytes = parseHexBytes(resp, "4104")
+                        if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
+                    }
+                    3 -> {
+                        val resp = sendObdCommand(output, input, "0111", 80)
+                        val bytes = parseHexBytes(resp, "4111")
+                        if (bytes.isNotEmpty()) liveThrottlePct = (bytes[0] * 100) / 255
+                    }
+                }
+            }
+            // Screen 3: Temperatures -> Coolant, Oil Temp, Intake Air, Battery
+            3 -> {
+                when (tick % 4) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "0105", 80)
+                        val bytes = parseHexBytes(resp, "4105")
+                        if (bytes.isNotEmpty()) liveCoolantC = bytes[0] - 40
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "221310", 90)
+                        val bytes = parseHexBytes(resp, "621310")
+                        if (bytes.isNotEmpty()) liveOilTempC = bytes[0] - 40
+                    }
+                    2 -> {
+                        val resp = sendObdCommand(output, input, "010F", 80)
+                        val bytes = parseHexBytes(resp, "410F")
+                        if (bytes.isNotEmpty()) liveIntakeC = bytes[0] - 40
+                    }
+                    3 -> {
+                        val atrvResp = sendObdCommand(output, input, "ATRV", 60)
+                        val v = atrvResp.replace("V", "").replace("v", "").trim().toFloatOrNull()
+                        if (v != null && v > 5f) liveBatVolts = v
+                    }
+                }
+            }
+            // Screen 4: Track & Dynamics -> Throttle %, RPM, Load %
+            4 -> {
+                when (tick % 2) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "0111", 80)
+                        val bytes = parseHexBytes(resp, "4111")
+                        if (bytes.isNotEmpty()) liveThrottlePct = (bytes[0] * 100) / 255
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "010C", 80)
+                        val bytes = parseHexBytes(resp, "410C")
+                        if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                    }
+                }
+            }
+            // Screen 5: Fuel & Trip Economy -> Fuel %, Load %
+            5 -> {
+                when (tick % 2) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "012F", 80)
+                        val bytes = parseHexBytes(resp, "412F")
+                        if (bytes.isNotEmpty()) liveFuelLevelPct = (bytes[0] * 100) / 255
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "0104", 80)
+                        val bytes = parseHexBytes(resp, "4104")
+                        if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
+                    }
+                }
+            }
+            // Diagnostic Screens (6, 8-12): Trims, Fuel Rail, AFR, Timing
+            else -> {
+                when (tick % 4) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "0106", 80)
+                        val bytes = parseHexBytes(resp, "4106")
+                        if (bytes.isNotEmpty()) liveStft = ((bytes[0] - 128) * 100f) / 128f
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "0123", 80)
+                        val bytes = parseHexBytes(resp, "4123")
+                        if (bytes.size >= 2) liveRailPressurePsi = ((((bytes[0] * 256) + bytes[1]) * 10) * 0.145038f).toInt()
+                    }
+                    2 -> {
+                        val resp = sendObdCommand(output, input, "0124", 80)
+                        val bytes = parseHexBytes(resp, "4124")
+                        if (bytes.size >= 2) liveAfr = (((bytes[0] * 256) + bytes[1]) / 32768.0f) * 14.7f
+                    }
+                    3 -> {
+                        val resp = sendObdCommand(output, input, "010E", 80)
+                        val bytes = parseHexBytes(resp, "410E")
+                        if (bytes.isNotEmpty()) liveSparkAdvance = (bytes[0] / 2.0f) - 64.0f
+                    }
+                }
+            }
+        }
+    }
+
+    private fun executeSafetySweep(output: OutputStream, input: java.io.InputStream) {
+        // Query TPMS on BCM
+        sendObdCommand(output, input, "ATSH 720", 90)
+        val p0 = parseHexBytes(sendObdCommand(output, input, "222A05", 90), "622A05")
+        if (p0.isNotEmpty()) flPsi = ((p0[0] * 1373f) / 1000f) * 0.145038f
+
+        val p1 = parseHexBytes(sendObdCommand(output, input, "222A06", 90), "622A06")
+        if (p1.isNotEmpty()) frPsi = ((p1[0] * 1373f) / 1000f) * 0.145038f
+
+        val p2 = parseHexBytes(sendObdCommand(output, input, "222A07", 90), "622A07")
+        if (p2.isNotEmpty()) rlPsi = ((p2[0] * 1373f) / 1000f) * 0.145038f
+
+        val p3 = parseHexBytes(sendObdCommand(output, input, "222A08", 90), "622A08")
+        if (p3.isNotEmpty()) rrPsi = ((p3[0] * 1373f) / 1000f) * 0.145038f
+
+        // Restore PCM
+        sendObdCommand(output, input, "ATSH 7E0", 90)
+
+        // Check Coolant & Oil Temp alarms
+        val cool = parseHexBytes(sendObdCommand(output, input, "0105", 80), "4105")
+        if (cool.isNotEmpty()) liveCoolantC = cool[0] - 40
+
+        val oil = parseHexBytes(sendObdCommand(output, input, "221310", 90), "621310")
+        if (oil.isNotEmpty()) liveOilTempC = oil[0] - 40
+    }
+
+    private fun pushTelemetrySnapshot(nowMs: Long) {
+        // ND2 Gear Calculation
+        liveGear = when {
+            liveRpm == 0 && liveSpeedKmh == 0 -> '-'
+            liveSpeedKmh < 3 -> if (liveRpm > 400) 'N' else '-'
+            else -> {
+                val r = liveRpm.toFloat() / max(1f, liveSpeedKmh.toFloat())
+                when {
+                    r < 35.0f -> '6'
+                    r < 45.0f -> '5'
+                    r < 56.0f -> '4'
+                    r < 77.0f -> '3'
+                    r < 125.0f -> '2'
+                    else -> '1'
+                }
+            }
+        }
+
+        // Real Engine Dynamics Output
+        liveHp = min(181, ((liveRpm / 7500.0f) * 181.0f * (liveThrottlePct / 100.0f)).toInt())
+        liveTorque = min(151, (151.0f * (liveEngineLoadPct / 100.0f)).toInt())
+
+        // Dynamic Deceleration Rate (Braking %)
+        val dtSec = max(0.02f, (nowMs - lastSpeedTimeMs) / 1000.0f)
+        val dSpeedMps = (liveSpeedKmh - lastSpeedKmh) * (1000.0f / 3600.0f)
+        val accelMps2 = dSpeedMps / dtSec
+        lastSpeedKmh = liveSpeedKmh
+        lastSpeedTimeMs = nowMs
+
+        if (accelMps2 < -0.6f && liveThrottlePct < 5) {
+            liveBrakePct = min(100, max(0, ((-accelMps2 / 6.5f) * 100.0f).toInt()))
+        } else {
+            liveBrakePct = 0
+        }
+
+        // Acceleration Timer (0-60 MPH)
+        if (liveSpeedKmh == 0) {
+            timerState = 0
+            accel0to60 = 0.0f
+        } else if (liveSpeedKmh in 1..96) {
+            if (timerState == 0) {
+                timerStartMs = nowMs
+                timerState = 1
+            }
+            accel0to60 = (nowMs - timerStartMs) / 1000.0f
+        } else if (liveSpeedKmh >= 97 && timerState == 1) {
+            timerState = 2
+            accel0to60 = (nowMs - timerStartMs) / 1000.0f
+            if (accel0to60 in 3.0f..15.0f && (best0to60 == 0f || accel0to60 < best0to60)) {
+                best0to60 = accel0to60
+            }
+        }
+
+        val instantMpg = if (liveSpeedKmh > 5) {
+            min(60.0f, max(0.0f, (liveSpeedKmh * 0.621371f) / max(0.1f, (liveEngineLoadPct * 0.04f))))
+        } else 0.0f
+
+        val rangeMiles = (liveFuelLevelPct * 4.2f).toInt()
+
+        // Push to C++ UI Engine
+        NativeBridge.nativeUpdateFullTelemetry(
+            liveRpm, liveSpeedKmh, liveCoolantC, liveOilTempC, liveIntakeC, liveAmbientC,
+            liveBatVolts, liveEngineLoadPct, liveThrottlePct, liveFuelLevelPct,
+            liveGear, liveBrakePct, liveHp, liveTorque,
+            accel0to60, best0to60, timerState,
+            instantMpg, 32.8f, 0.0f, rangeMiles,
+            liveAfr, liveStft, liveLtft, liveKnockRetard, liveRailPressurePsi,
+            liveSparkAdvance, 0.0f, 0.0f,
+            liveOilTempC - 10, 0, 0.0f,
+            flPsi, frPsi, rlPsi, rrPsi,
+            flTemp, frTemp, rlTemp, rrTemp,
+            0, false, true
+        )
     }
 
     fun stop() {

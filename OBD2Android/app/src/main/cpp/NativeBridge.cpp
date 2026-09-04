@@ -175,6 +175,12 @@ Java_com_mx5dash_obd2android_bridge_NativeBridge_nativeSetScreen(JNIEnv*, jclass
     gUi.setScreen((uint8_t)index);
 }
 
+JNIEXPORT jint JNICALL
+Java_com_mx5dash_obd2android_bridge_NativeBridge_nativeGetCurrentScreen(JNIEnv*, jclass) {
+    std::lock_guard<std::mutex> lock(gRenderMutex);
+    return (jint)gUi.currentScreen();
+}
+
 JNIEXPORT void JNICALL
 Java_com_mx5dash_obd2android_bridge_NativeBridge_nativeSetThemeMode(JNIEnv*, jclass, jint mode) {
     std::lock_guard<std::mutex> lock(gRenderMutex);
