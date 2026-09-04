@@ -179,13 +179,18 @@ static void driveCycle(VehicleData& out, float t) {
 
     out.speedKmh = (uint8_t)(spd + 0.5f);
     out.rpm = (uint16_t)(spd * ratio[gi] + (spd < 1.0f ? 780.0f : 0.0f) + 0.5f);
+    out.isAutomatic = true;
 
     // mirror ObdService::estimateGear() thresholds so the white gear box
     // behaves exactly like the firmware
-    if (out.rpm == 0 && out.speedKmh == 0)      out.gear = '-';
-    else if (out.speedKmh == 0)                 out.gear = 'N';
-    else {
-        float r = (float)out.rpm / (float)out.speedKmh;
+    if (out.rpm == 0 && out.speedKmh == 0) {
+        out.gear = '-';
+    } else if (out.isAutomatic && out.speedKmh < 2) {
+        out.gear = (out.rpm > 400) ? 'P' : '-';
+    } else if (!out.isAutomatic && out.speedKmh < 3) {
+        out.gear = (out.rpm > 400) ? 'N' : '-';
+    } else {
+        float r = (float)out.rpm / (float)(out.speedKmh > 0 ? out.speedKmh : 1);
         if      (r < 35.0f) out.gear = '6';
         else if (r < 45.0f) out.gear = '5';
         else if (r < 56.0f) out.gear = '4';

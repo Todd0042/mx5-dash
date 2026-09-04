@@ -22,6 +22,7 @@ public:
     static void saveBrightness(uint8_t pct);
     static void saveAutoLog(bool enabled);
     static void saveSpeedMask(bool enabled);
+    static void saveTransAuto(bool isAuto);
     static void saveBlePrefix(const char* prefix);
     static void saveBleScanTimeout(uint16_t ms);
     static void savePairedMac(const char* mac);
@@ -34,6 +35,7 @@ public:
     static uint8_t  getBrightness();
     static bool     getAutoLog();
     static bool     getSpeedMask();
+    static bool     getTransAuto();
     static void     getBlePrefix(char* buf, size_t len);
     static uint16_t getBleScanTimeout();
     static void     getPairedMac(char* buf, size_t len);

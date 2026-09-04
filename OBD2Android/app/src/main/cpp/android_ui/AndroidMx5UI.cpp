@@ -1277,11 +1277,11 @@ lv_obj_t* AndroidMx5UI::buildMenuScreen() {
     PodConfig pods[CONTENT_SCREEN_COUNT] = {
         {"MPH",   "SPEED",  SCREEN_SPEED},
         {"PSI",   "TIRES",  SCREEN_TPMS},
-        {"RPM",   "ENGINE", SCREEN_RPM},
         {"°F",    "TEMPS",  SCREEN_TEMPS},
-        {"0-60",  "TRACK",  SCREEN_TRACK},
-        {"MPG",   "TRIP",   SCREEN_TRIP},
-        {"OBD",   "DIAG",   SCREEN_DIAG}
+        {"OBD",   "DIAG",   SCREEN_DIAG},
+        {"0-60",  "FAFO",   SCREEN_TRACK},
+        {"RPM",   "TACH",   SCREEN_RPM},
+        {"MPG",   "TRIP",   SCREEN_TRIP}
     };
 
     const int16_t podW = 76;
@@ -1549,80 +1549,56 @@ lv_obj_t* AndroidMx5UI::buildSettingsScreen() {
     lv_obj_set_style_border_width(rightCard, 1, 0);
     lockNoScroll(rightCard);
 
-    // 1. Units
+    // 1. Transmission Mode (AT vs MT)
+    lv_obj_t* transHeader = lv_label_create(rightCard);
+    lv_obj_set_style_text_font(transHeader, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(transHeader, C_DIM, 0);
+    lv_label_set_text(transHeader, "TRANSMISSION TYPE");
+    lv_obj_set_pos(transHeader, 12, 8);
+    lockNoScroll(transHeader);
+
+    btnTransAuto_   = makeBtn(rightCard, 12, 24, 165, 26, "AUTO (6AT)", 118);
+    btnTransManual_ = makeBtn(rightCard, 187, 24, 165, 26, "MANUAL (6MT)", 119);
+
+    // 2. Units
     lv_obj_t* unitHeader = lv_label_create(rightCard);
     lv_obj_set_style_text_font(unitHeader, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(unitHeader, C_DIM, 0);
     lv_label_set_text(unitHeader, "MEASUREMENT UNITS");
-    lv_obj_set_pos(unitHeader, 12, 10);
+    lv_obj_set_pos(unitHeader, 12, 54);
     lockNoScroll(unitHeader);
 
-    btnUnitUs_  = makeBtn(rightCard, 12, 28, 165, 30, "US (MPH/°F)", 110);
-    btnUnitMet_ = makeBtn(rightCard, 187, 28, 165, 30, "METRIC (KM/H)", 111);
+    btnUnitUs_  = makeBtn(rightCard, 12, 70, 165, 26, "US (MPH/°F)", 110);
+    btnUnitMet_ = makeBtn(rightCard, 187, 70, 165, 26, "METRIC (KM/H)", 111);
 
-    // 2. Datalogger
+    // 3. Datalogger
     lv_obj_t* logHeader = lv_label_create(rightCard);
     lv_obj_set_style_text_font(logHeader, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(logHeader, C_DIM, 0);
     lv_label_set_text(logHeader, "INCIDENT DATALOGGER");
-    lv_obj_set_pos(logHeader, 12, 68);
+    lv_obj_set_pos(logHeader, 12, 100);
     lockNoScroll(logHeader);
 
-    btnLogAuto_ = makeBtn(rightCard, 12, 86, 165, 30, "AUTO INCIDENT", 112);
-    btnLogDis_  = makeBtn(rightCard, 187, 86, 165, 30, "DISABLED", 113);
+    btnLogAuto_ = makeBtn(rightCard, 12, 116, 165, 26, "AUTO INCIDENT", 112);
+    btnLogDis_  = makeBtn(rightCard, 187, 116, 165, 26, "DISABLED", 113);
 
-    // 3. Privacy Masking
+    // 4. Privacy Masking
     lv_obj_t* maskHeader = lv_label_create(rightCard);
     lv_obj_set_style_text_font(maskHeader, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(maskHeader, C_DIM, 0);
     lv_label_set_text(maskHeader, "SPEED PRIVACY MASKING");
-    lv_obj_set_pos(maskHeader, 12, 126);
+    lv_obj_set_pos(maskHeader, 12, 146);
     lockNoScroll(maskHeader);
 
-    btnMaskOn_  = makeBtn(rightCard, 12, 144, 165, 28, "MASK: ON", 114);
-    btnMaskOff_ = makeBtn(rightCard, 187, 144, 165, 28, "RAW: OFF", 115);
+    btnMaskOn_  = makeBtn(rightCard, 12, 162, 165, 26, "MASK: ON", 114);
+    btnMaskOff_ = makeBtn(rightCard, 187, 162, 165, 26, "RAW: OFF", 115);
 
-    // 4. BLE Connection
-    lv_obj_t* bleNavBtn = lv_obj_create(rightCard);
-    lv_obj_remove_style_all(bleNavBtn);
-    lv_obj_set_size(bleNavBtn, 342, 32);
-    lv_obj_set_pos(bleNavBtn, 12, 182);
-    lv_obj_set_style_bg_color(bleNavBtn, lv_color_hex(0x0E1013), 0);
-    lv_obj_set_style_bg_opa(bleNavBtn, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(bleNavBtn, 8, 0);
+    // 5. BLE & TPMS Navigation
+    lv_obj_t* bleNavBtn = makeBtn(rightCard, 12, 198, 165, 28, "BLE CONFIG >", 116);
     lv_obj_set_style_border_color(bleNavBtn, C_ACCENT, 0);
-    lv_obj_set_style_border_width(bleNavBtn, 1, 0);
-    lv_obj_set_user_data(bleNavBtn, (void*)(uintptr_t)116);
-    lv_obj_add_event_cb(bleNavBtn, onSettingsActionClick, LV_EVENT_CLICKED, this);
-    lockNoScroll(bleNavBtn);
 
-    lv_obj_t* bleNavLbl = lv_label_create(bleNavBtn);
-    lv_obj_set_style_text_font(bleNavLbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(bleNavLbl, C_ACCENT, 0);
-    lv_label_set_text(bleNavLbl, "BLE CONNECTION  >");
-    lv_obj_center(bleNavLbl);
-    lockNoScroll(bleNavLbl);
-
-    // 5. Recalibrate TPMS
-    lv_obj_t* tpmsBtn = lv_obj_create(rightCard);
-    lv_obj_remove_style_all(tpmsBtn);
-    lv_obj_set_size(tpmsBtn, 342, 30);
-    lv_obj_set_pos(tpmsBtn, 12, 222);
-    lv_obj_set_style_bg_color(tpmsBtn, lv_color_hex(0x0E1013), 0);
-    lv_obj_set_style_bg_opa(tpmsBtn, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(tpmsBtn, 8, 0);
+    lv_obj_t* tpmsBtn = makeBtn(rightCard, 187, 198, 165, 28, "TPMS LEARN >", 117);
     lv_obj_set_style_border_color(tpmsBtn, C_OK, 0);
-    lv_obj_set_style_border_width(tpmsBtn, 1, 0);
-    lv_obj_set_user_data(tpmsBtn, (void*)(uintptr_t)117);
-    lv_obj_add_event_cb(tpmsBtn, onSettingsActionClick, LV_EVENT_CLICKED, this);
-    lockNoScroll(tpmsBtn);
-
-    lv_obj_t* tpmsLbl = lv_label_create(tpmsBtn);
-    lv_obj_set_style_text_font(tpmsLbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(tpmsLbl, C_OK, 0);
-    lv_label_set_text(tpmsLbl, "RECALIBRATE TPMS  >");
-    lv_obj_center(tpmsLbl);
-    lockNoScroll(tpmsLbl);
 
     updateSettingsScreen();
     return scr;
@@ -2262,13 +2238,16 @@ lv_obj_t* AndroidMx5UI::buildWheelMapScreen() {
 // Lifecycle & Update Dispatcher
 // ---------------------------------------------------------------------------
 void AndroidMx5UI::begin() {
+    transAuto_ = UserPrefs::getTransAuto();
+    data_local_.isAutomatic = transAuto_;
+
     screens_[SCREEN_SPEED]            = buildSpeedScreen();
     screens_[SCREEN_TPMS]             = buildTpmsScreen();
-    screens_[SCREEN_RPM]              = buildRpmScreen();
     screens_[SCREEN_TEMPS]            = buildEngineScreen();
-    screens_[SCREEN_TRACK]            = buildTrackScreen();
-    screens_[SCREEN_TRIP]             = buildTripScreen();
     screens_[SCREEN_DIAG]             = buildDiagnosticsScreen();
+    screens_[SCREEN_TRACK]            = buildTrackScreen();
+    screens_[SCREEN_RPM]              = buildRpmScreen();
+    screens_[SCREEN_TRIP]             = buildTripScreen();
     screens_[SCREEN_MENU]             = buildMenuScreen();
     screens_[SCREEN_DIAG_SUB_FUEL]    = buildDiagSubFuel();
     screens_[SCREEN_DIAG_SUB_CYL]     = buildDiagSubCyl();
@@ -2697,6 +2676,9 @@ void AndroidMx5UI::updateSettingsScreen() {
     highlight(btnBri75_, userBrightness_ == 75);
     highlight(btnBri100_, userBrightness_ >= 95);
 
+    highlight(btnTransAuto_, transAuto_);
+    highlight(btnTransManual_, !transAuto_);
+
     highlight(btnUnitUs_, unitsUs_);
     highlight(btnUnitMet_, !unitsUs_);
 
@@ -2805,6 +2787,8 @@ void AndroidMx5UI::onSettingsActionClick(lv_event_t* e) {
         case 115: ui->speedMaskEnabled_ = false; UserPrefs::saveSpeedMask(0); ui->updateSettingsScreen(); break;
         case 116: ui->setScreen(SCREEN_BLE_CONFIG); break;
         case 117: ui->setScreen(SCREEN_WHEEL_MAP); break;
+        case 118: ui->transAuto_ = true; UserPrefs::saveTransAuto(true); ui->data_local_.isAutomatic = true; ui->updateSettingsScreen(); break;
+        case 119: ui->transAuto_ = false; UserPrefs::saveTransAuto(false); ui->data_local_.isAutomatic = false; ui->updateSettingsScreen(); break;
     }
 }
 

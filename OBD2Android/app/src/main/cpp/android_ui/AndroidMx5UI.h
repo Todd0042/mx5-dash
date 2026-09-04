@@ -20,11 +20,11 @@ public:
 
     static constexpr uint8_t SCREEN_SPEED = 0;
     static constexpr uint8_t SCREEN_TPMS  = 1;
-    static constexpr uint8_t SCREEN_RPM   = 2;
-    static constexpr uint8_t SCREEN_TEMPS = 3;
+    static constexpr uint8_t SCREEN_TEMPS = 2;
+    static constexpr uint8_t SCREEN_DIAG  = 3;
     static constexpr uint8_t SCREEN_TRACK = 4;
-    static constexpr uint8_t SCREEN_TRIP  = 5;
-    static constexpr uint8_t SCREEN_DIAG  = 6;
+    static constexpr uint8_t SCREEN_RPM   = 5;
+    static constexpr uint8_t SCREEN_TRIP  = 6;
     static constexpr uint8_t SCREEN_MENU  = 7;
 
     // Advanced Diagnostic Sub-Dashboards
@@ -270,6 +270,7 @@ private:
     bool unitsUs_ = true;
     bool autoLogEnabled_ = true;
     bool speedMaskEnabled_ = true;
+    bool transAuto_ = true;
     uint8_t userBrightness_ = 95;
 
     lv_obj_t* btnRotLeft_ = nullptr;
@@ -281,6 +282,8 @@ private:
     lv_obj_t* btnBri50_ = nullptr;
     lv_obj_t* btnBri75_ = nullptr;
     lv_obj_t* btnBri100_ = nullptr;
+    lv_obj_t* btnTransAuto_ = nullptr;
+    lv_obj_t* btnTransManual_ = nullptr;
     lv_obj_t* btnUnitUs_ = nullptr;
     lv_obj_t* btnUnitMet_ = nullptr;
     lv_obj_t* btnLogAuto_ = nullptr;

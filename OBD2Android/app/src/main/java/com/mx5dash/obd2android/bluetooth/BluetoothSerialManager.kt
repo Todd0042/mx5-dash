@@ -117,6 +117,7 @@ class BluetoothSerialManager(
     private var lastSpeedKmh = 0
     private var lastSpeedTimeMs = System.currentTimeMillis()
     private var lastSafetySweepMs = 0L
+    private var tcmPrnd = '-'
 
     @SuppressLint("MissingPermission")
     fun start() {
@@ -344,7 +345,7 @@ class BluetoothSerialManager(
                     }
                 }
             }
-            // Screen 1: TPMS -> 4-Corner Pressure & Temp + Ambient Air Temp via BCM (Header 720)
+            // Screen 1: TPMS -> 4-Corner Pressure & Temp + PRND on BCM 720, then Ambient Temp on PCM 7E0
             1 -> {
                 sendObdCommand(output, input, "ATSH 720", 90)
                 val p0 = parseHexBytes(sendObdCommand(output, input, "222A05", 90), "622A05")
@@ -371,39 +372,34 @@ class BluetoothSerialManager(
                     if (p3.size >= 2) rrTemp = (p3[1] - 40).toFloat()
                 }
 
-                val ambResp = sendObdCommand(output, input, "220146", 90)
-                val ambBytes = parseHexBytes(ambResp, "620146")
-                if (ambBytes.isNotEmpty()) {
-                    val temp = ambBytes[0] - 40
-                    if (temp in -40..55) {
-                        liveAmbientC = temp
+                // PRND Selector Position (DID 222A27 on Header 720)
+                val prndResp = sendObdCommand(output, input, "222A27", 90)
+                val prndBytes = parseHexBytes(prndResp, "622A27")
+                if (prndBytes.isNotEmpty()) {
+                    tcmPrnd = when (prndBytes[0]) {
+                        1 -> 'P'
+                        2 -> 'R'
+                        3 -> 'N'
+                        4 -> 'D'
+                        5 -> 'M'
+                        else -> '-'
                     }
                 }
 
                 sendObdCommand(output, input, "ATSH 7E0", 90)
-            }
-            // Screen 2: Engine Tachometer -> High-rate RPM, Load %, Throttle %, Battery Volts
-            2 -> {
-                when (tick % 4) {
-                    0, 2 -> {
-                        val resp = sendObdCommand(output, input, "010C", 80)
-                        val bytes = parseHexBytes(resp, "410C")
-                        if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
-                    }
-                    1 -> {
-                        val resp = sendObdCommand(output, input, "0104", 80)
-                        val bytes = parseHexBytes(resp, "4104")
-                        if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
-                    }
-                    3 -> {
-                        val resp = sendObdCommand(output, input, "0111", 80)
-                        val bytes = parseHexBytes(resp, "4111")
-                        if (bytes.isNotEmpty()) liveThrottlePct = parseCalibratedThrottle(bytes[0])
+
+                // Ambient Air Temp (Mode 01 PID 46 on PCM 7E0)
+                val ambResp = sendObdCommand(output, input, "0146", 80)
+                val ambBytes = parseHexBytes(ambResp, "4146")
+                if (ambBytes.isNotEmpty()) {
+                    val temp = ambBytes[0] - 40
+                    if (temp in -40..60) {
+                        liveAmbientC = temp
                     }
                 }
             }
-            // Screen 3: Temperatures -> Coolant, Oil Temp, Intake Air, Battery
-            3 -> {
+            // Screen 2: Temperatures -> Coolant, Oil Temp, Intake Air, Battery
+            2 -> {
                 when (tick % 4) {
                     0 -> {
                         val resp = sendObdCommand(output, input, "0105", 80)
@@ -427,7 +423,37 @@ class BluetoothSerialManager(
                     }
                 }
             }
-            // Screen 4: Track & Dynamics -> Throttle %, RPM, Load %
+            // Screen 3: Diagnostic Hub -> Trims (STFT & LTFT), Fuel Rail, AFR, Timing
+            3 -> {
+                when (tick % 5) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "0106", 80)
+                        val bytes = parseHexBytes(resp, "4106")
+                        if (bytes.isNotEmpty()) liveStft = ((bytes[0] - 128) * 100f) / 128f
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "0107", 80)
+                        val bytes = parseHexBytes(resp, "4107")
+                        if (bytes.isNotEmpty()) liveLtft = ((bytes[0] - 128) * 100f) / 128f
+                    }
+                    2 -> {
+                        val resp = sendObdCommand(output, input, "0123", 80)
+                        val bytes = parseHexBytes(resp, "4123")
+                        if (bytes.size >= 2) liveRailPressurePsi = ((((bytes[0] * 256) + bytes[1]) * 10) * 0.145038f).toInt()
+                    }
+                    3 -> {
+                        val resp = sendObdCommand(output, input, "0124", 80)
+                        val bytes = parseHexBytes(resp, "4124")
+                        if (bytes.size >= 2) liveAfr = (((bytes[0] * 256) + bytes[1]) / 32768.0f) * 14.7f
+                    }
+                    4 -> {
+                        val resp = sendObdCommand(output, input, "010E", 80)
+                        val bytes = parseHexBytes(resp, "410E")
+                        if (bytes.isNotEmpty()) liveSparkAdvance = (bytes[0] / 2.0f) - 64.0f
+                    }
+                }
+            }
+            // Screen 4: Track & Dynamics (FAFO) -> Throttle %, RPM, Load %
             4 -> {
                 when (tick % 2) {
                     0 -> {
@@ -442,8 +468,28 @@ class BluetoothSerialManager(
                     }
                 }
             }
-            // Screen 5: Fuel & Trip Economy -> Fuel %, Load %
+            // Screen 5: Engine Tachometer -> High-rate RPM, Load %, Throttle %
             5 -> {
+                when (tick % 3) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "010C", 80)
+                        val bytes = parseHexBytes(resp, "410C")
+                        if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "0104", 80)
+                        val bytes = parseHexBytes(resp, "4104")
+                        if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
+                    }
+                    2 -> {
+                        val resp = sendObdCommand(output, input, "0111", 80)
+                        val bytes = parseHexBytes(resp, "4111")
+                        if (bytes.isNotEmpty()) liveThrottlePct = parseCalibratedThrottle(bytes[0])
+                    }
+                }
+            }
+            // Screen 6: Fuel & Trip Economy -> Fuel %, Load %
+            6 -> {
                 when (tick % 2) {
                     0 -> {
                         val resp = sendObdCommand(output, input, "012F", 80)
@@ -457,7 +503,7 @@ class BluetoothSerialManager(
                     }
                 }
             }
-            // Diagnostic Screens (6, 8-12): Trims (STFT & LTFT), Fuel Rail, AFR, Timing
+            // Diagnostic Sub-Screens (8-12): Trims (STFT & LTFT), Fuel Rail, AFR, Timing
             else -> {
                 when (tick % 5) {
                     0 -> {
@@ -517,41 +563,76 @@ class BluetoothSerialManager(
             if (p3.size >= 2) rrTemp = (p3[1] - 40).toFloat()
         }
 
-        // Ambient Air Temp (DID 220146 on Header 720)
-        val ambResp = sendObdCommand(output, input, "220146", 90)
-        val ambBytes = parseHexBytes(ambResp, "620146")
-        if (ambBytes.isNotEmpty()) {
-            val temp = ambBytes[0] - 40
-            if (temp in -40..55) {
-                liveAmbientC = temp
+        // PRND Selector Position (DID 222A27 on Header 720)
+        val prndResp = sendObdCommand(output, input, "222A27", 90)
+        val prndBytes = parseHexBytes(prndResp, "622A27")
+        if (prndBytes.isNotEmpty()) {
+            tcmPrnd = when (prndBytes[0]) {
+                1 -> 'P'
+                2 -> 'R'
+                3 -> 'N'
+                4 -> 'D'
+                5 -> 'M'
+                else -> '-'
             }
         }
 
         // Restore PCM
         sendObdCommand(output, input, "ATSH 7E0", 90)
 
-        // Check Coolant & Oil Temp alarms
+        // Check Coolant & Oil Temp alarms & Ambient Air Temp on PCM
         val cool = parseHexBytes(sendObdCommand(output, input, "0105", 80), "4105")
         if (cool.isNotEmpty()) liveCoolantC = cool[0] - 40
 
         val oil = parseHexBytes(sendObdCommand(output, input, "221310", 90), "621310")
         if (oil.isNotEmpty()) liveOilTempC = oil[0] - 40
+
+        val amb = parseHexBytes(sendObdCommand(output, input, "0146", 80), "4146")
+        if (amb.isNotEmpty()) {
+            val temp = amb[0] - 40
+            if (temp in -40..60) {
+                liveAmbientC = temp
+            }
+        }
     }
 
     private fun pushTelemetrySnapshot(nowMs: Long) {
-        // ND2 Gear Calculation
-        liveGear = when {
-            liveRpm == 0 && liveSpeedKmh == 0 -> '-'
-            liveSpeedKmh < 3 -> if (liveRpm > 400) 'N' else '-'
-            else -> {
-                val r = liveRpm.toFloat() / max(1f, liveSpeedKmh.toFloat())
-                when {
-                    r < 35.0f -> '6'
-                    r < 45.0f -> '5'
-                    r < 56.0f -> '4'
-                    r < 77.0f -> '3'
-                    r < 125.0f -> '2'
-                    else -> '1'
+        // ND2 Transmission PRND & Active Gear Logic (Supports both Automatic 6AT & Manual 6MT)
+        val isAuto = context.getSharedPreferences("sys_prefs", Context.MODE_PRIVATE).getBoolean("trans_auto", true)
+        liveGear = if (isAuto) {
+            when {
+                liveRpm == 0 && liveSpeedKmh == 0 -> '-'
+                tcmPrnd == 'R' -> 'R'
+                tcmPrnd == 'P' -> 'P'
+                tcmPrnd == 'N' -> 'N'
+                liveSpeedKmh < 2 -> if (liveRpm > 400) 'P' else '-'
+                else -> {
+                    // Forward Drive Gear Ratio (1..6)
+                    val r = liveRpm.toFloat() / max(1f, liveSpeedKmh.toFloat())
+                    when {
+                        r < 35.0f -> '6'
+                        r < 45.0f -> '5'
+                        r < 56.0f -> '4'
+                        r < 77.0f -> '3'
+                        r < 125.0f -> '2'
+                        else -> '1'
+                    }
+                }
+            }
+        } else {
+            when {
+                liveRpm == 0 && liveSpeedKmh == 0 -> '-'
+                liveSpeedKmh < 3 -> if (liveRpm > 400) 'N' else '-'
+                else -> {
+                    val r = liveRpm.toFloat() / max(1f, liveSpeedKmh.toFloat())
+                    when {
+                        r < 35.0f -> '6'
+                        r < 45.0f -> '5'
+                        r < 56.0f -> '4'
+                        r < 77.0f -> '3'
+                        r < 125.0f -> '2'
+                        else -> '1'
+                    }
                 }
             }
         }

@@ -523,8 +523,8 @@ class Mx5RenderView @JvmOverloads constructor(
                         NativeBridge.nativeTouch(1, logicalX.toInt(), logicalY.toInt())
                         val currentScreen = NativeBridge.nativeGetCurrentScreen()
                         if (currentScreen in 8..12) {
-                            // Exit sub-screen back to Diagnostic Hub (6)
-                            startDirectionalTransition(6, if (dy < 0) Direction.LEFT else Direction.RIGHT)
+                            // Exit sub-screen back to Diagnostic Hub (SCREEN_DIAG = 3)
+                            startDirectionalTransition(3, if (dy < 0) Direction.LEFT else Direction.RIGHT)
                         } else {
                             NativeBridge.nativeToggleMenu()
                         }

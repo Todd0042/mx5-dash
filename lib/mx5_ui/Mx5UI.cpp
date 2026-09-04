@@ -1,5 +1,6 @@
 #include "Mx5UI.h"
 #include "../mx5_config/DtcDatabase.h"
+#include "../mx5_config/UserPrefs.h"
 
 #if defined(ARDUINO) && !defined(PLATFORM_NATIVE)
 #include "../waveshare_display/Waveshare35B.h"
@@ -144,11 +145,11 @@ static const char* getScreenTitle(uint8_t index) {
     switch (index) {
         case Mx5UI::SCREEN_SPEED:            return "HERO SPEEDOMETER";
         case Mx5UI::SCREEN_TPMS:             return "TIRE MONITOR (TPMS)";
-        case Mx5UI::SCREEN_RPM:              return "ENGINE TACHOMETER";
         case Mx5UI::SCREEN_TEMPS:            return "TEMPS & PRESSURES";
-        case Mx5UI::SCREEN_TRACK:            return "TRACK & DYNAMICS";
-        case Mx5UI::SCREEN_TRIP:             return "TRIP & FUEL ECONOMY";
         case Mx5UI::SCREEN_DIAG:             return "DIAGNOSTICS & DTC";
+        case Mx5UI::SCREEN_TRACK:            return "TRACK & DYNAMICS (FAFO)";
+        case Mx5UI::SCREEN_RPM:              return "ENGINE TACHOMETER";
+        case Mx5UI::SCREEN_TRIP:             return "TRIP & FUEL ECONOMY";
         case Mx5UI::SCREEN_MENU:             return "MENU HUB";
         case Mx5UI::SCREEN_DIAG_SUB_FUEL:    return "FUEL TRIMS & HPFP";
         case Mx5UI::SCREEN_DIAG_SUB_CYL:     return "CYLINDER MISFIRE";
@@ -411,13 +412,16 @@ static void onScreenEvent(lv_event_t* e) {
 }
 
 void Mx5UI::begin() {
+    transAuto_ = UserPrefs::getTransAuto();
+    data_local_.isAutomatic = transAuto_;
+
     screens_[SCREEN_SPEED] = buildSpeedScreen();
     screens_[SCREEN_TPMS]  = buildTpmsScreen();
-    screens_[SCREEN_RPM]   = buildRpmScreen();
     screens_[SCREEN_TEMPS] = buildEngineScreen();
-    screens_[SCREEN_TRACK] = buildTrackScreen();
-    screens_[SCREEN_TRIP]  = buildTripScreen();
     screens_[SCREEN_DIAG]  = buildDiagnosticsScreen();
+    screens_[SCREEN_TRACK] = buildTrackScreen();
+    screens_[SCREEN_RPM]   = buildRpmScreen();
+    screens_[SCREEN_TRIP]  = buildTripScreen();
     screens_[SCREEN_MENU]  = buildMenuScreen();
 
     // Diagnostic Sub-Dashboards
@@ -454,11 +458,11 @@ void Mx5UI::update() {
     switch (currentScreen_) {
         case SCREEN_SPEED: updateSpeedScreen();       break;
         case SCREEN_TPMS:  updateTpmsScreen();        break;
-        case SCREEN_RPM:   updateRpmScreen();         break;
         case SCREEN_TEMPS: updateEngineScreen();      break;
-        case SCREEN_TRACK: updateTrackScreen();       break;
-        case SCREEN_TRIP:  updateTripScreen();        break;
         case SCREEN_DIAG:  updateDiagnosticsScreen(); break;
+        case SCREEN_TRACK: updateTrackScreen();       break;
+        case SCREEN_RPM:   updateRpmScreen();         break;
+        case SCREEN_TRIP:  updateTripScreen();        break;
         case SCREEN_MENU:  updateMenuScreen();        break;
 
         case SCREEN_DIAG_SUB_FUEL:    updateDiagSubFuel();    break;
@@ -1445,11 +1449,11 @@ lv_obj_t* Mx5UI::buildMenuScreen() {
     PodConfig pods[CONTENT_SCREEN_COUNT] = {
         {"MPH",   "SPEED",  SCREEN_SPEED},
         {"PSI",   "TIRES",  SCREEN_TPMS},
-        {"RPM",   "ENGINE", SCREEN_RPM},
         {"°F",    "TEMPS",  SCREEN_TEMPS},
-        {"0-60",  "TRACK",  SCREEN_TRACK},
-        {"MPG",   "TRIP",   SCREEN_TRIP},
-        {"OBD",   "DIAG",   SCREEN_DIAG}
+        {"OBD",   "DIAG",   SCREEN_DIAG},
+        {"0-60",  "FAFO",   SCREEN_TRACK},
+        {"RPM",   "TACH",   SCREEN_RPM},
+        {"MPG",   "TRIP",   SCREEN_TRIP}
     };
 
     const int16_t podW = 54;
@@ -3433,47 +3437,47 @@ lv_obj_t* Mx5UI::buildSettingsScreen() {
     lv_obj_set_style_border_width(rightCard, 1, 0);
     lockNoScroll(rightCard);
 
-    // 1. Units
+    // 1. Transmission Mode (AT vs MT)
+    lv_obj_t* transHeader = lv_label_create(rightCard);
+    lv_obj_set_style_text_font(transHeader, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(transHeader, C_DIM, 0);
+    lv_label_set_text(transHeader, "TRANSMISSION TYPE");
+    lv_obj_set_pos(transHeader, 12, 6);
+    lockNoScroll(transHeader);
+
+    btnTransAuto_   = makeBtn(rightCard, 12, 20, 98, 24, "AUTO (6AT)", 120);
+    btnTransManual_ = makeBtn(rightCard, 118, 20, 98, 24, "MANUAL (6MT)", 121);
+
+    // 2. Units
     lv_obj_t* unitHeader = lv_label_create(rightCard);
     lv_obj_set_style_text_font(unitHeader, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(unitHeader, C_DIM, 0);
     lv_label_set_text(unitHeader, "MEASUREMENT UNITS");
-    lv_obj_set_pos(unitHeader, 12, 6);
+    lv_obj_set_pos(unitHeader, 12, 48);
     lockNoScroll(unitHeader);
 
-    btnUnitUs_  = makeBtn(rightCard, 12, 22, 98, 24, "US (MPH/°F)", 110);
-    btnUnitMet_ = makeBtn(rightCard, 118, 22, 98, 24, "METRIC (KM/H)", 111);
+    btnUnitUs_  = makeBtn(rightCard, 12, 62, 98, 24, "US (MPH/°F)", 110);
+    btnUnitMet_ = makeBtn(rightCard, 118, 62, 98, 24, "METRIC (KM/H)", 111);
 
-    // 2. Datalogger
+    // 3. Datalogger
     lv_obj_t* logHeader = lv_label_create(rightCard);
     lv_obj_set_style_text_font(logHeader, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(logHeader, C_DIM, 0);
     lv_label_set_text(logHeader, "INCIDENT DATALOGGER");
-    lv_obj_set_pos(logHeader, 12, 50);
+    lv_obj_set_pos(logHeader, 12, 90);
     lockNoScroll(logHeader);
 
-    btnLogAuto_ = makeBtn(rightCard, 12, 66, 98, 24, "AUTO INCIDENT", 112);
-    btnLogDis_  = makeBtn(rightCard, 118, 66, 98, 24, "DISABLED", 113);
-
-    // 3. Privacy Masking
-    lv_obj_t* maskHeader = lv_label_create(rightCard);
-    lv_obj_set_style_text_font(maskHeader, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(maskHeader, C_DIM, 0);
-    lv_label_set_text(maskHeader, "SPEED PRIVACY MASKING");
-    lv_obj_set_pos(maskHeader, 12, 94);
-    lockNoScroll(maskHeader);
-
-    btnMaskOn_  = makeBtn(rightCard, 12, 110, 98, 24, "MASK: ON", 114);
-    btnMaskOff_ = makeBtn(rightCard, 118, 110, 98, 24, "RAW: OFF", 115);
+    btnLogAuto_ = makeBtn(rightCard, 12, 104, 98, 24, "AUTO INCIDENT", 112);
+    btnLogDis_  = makeBtn(rightCard, 118, 104, 98, 24, "DISABLED", 113);
 
     // 4. Tools & Configuration Links
-    lv_obj_t* bleNavBtn = makeBtn(rightCard, 12, 142, 204, 28, "BLUETOOTH OBD SCANNER  >", 116);
+    lv_obj_t* bleNavBtn = makeBtn(rightCard, 12, 136, 204, 26, "BLUETOOTH OBD SCANNER  >", 116);
     lv_obj_set_style_border_color(bleNavBtn, C_ACCENT, 0);
 
-    lv_obj_t* tpmsNavBtn = makeBtn(rightCard, 12, 176, 204, 28, "TPMS WHEEL CALIBRATION  >", 117);
+    lv_obj_t* tpmsNavBtn = makeBtn(rightCard, 12, 168, 204, 26, "TPMS WHEEL CALIBRATION  >", 117);
     lv_obj_set_style_border_color(tpmsNavBtn, C_OK, 0);
 
-    lv_obj_t* wizNavBtn = makeBtn(rightCard, 12, 210, 204, 26, "INITIAL SETUP WIZARD  >", 118);
+    lv_obj_t* wizNavBtn = makeBtn(rightCard, 12, 200, 204, 26, "INITIAL SETUP WIZARD  >", 118);
     lv_obj_set_style_border_color(wizNavBtn, C_CHROME, 0);
 
     updateSettingsScreen();
@@ -3498,6 +3502,9 @@ void Mx5UI::updateSettingsScreen() {
     highlight(btnBri50_, userBrightness_ == 50);
     highlight(btnBri75_, userBrightness_ == 75);
     highlight(btnBri100_, userBrightness_ >= 95);
+
+    highlight(btnTransAuto_, transAuto_);
+    highlight(btnTransManual_, !transAuto_);
 
     highlight(btnUnitUs_, unitsUs_);
     highlight(btnUnitMet_, !unitsUs_);
@@ -3576,6 +3583,16 @@ void Mx5UI::onSettingsActionClick(lv_event_t* e) {
             break;
         case 119: // Wizard Finish -> Home Screen
             ui->setScreen(SCREEN_SPEED);
+            break;
+        case 120: // Transmission Auto (6AT)
+            ui->transAuto_ = true;
+            UserPrefs::saveTransAuto(true);
+            ui->data_local_.isAutomatic = true;
+            break;
+        case 121: // Transmission Manual (6MT)
+            ui->transAuto_ = false;
+            UserPrefs::saveTransAuto(false);
+            ui->data_local_.isAutomatic = false;
             break;
     }
     ui->updateSettingsScreen();

@@ -22,8 +22,10 @@ struct VehicleData {
     uint8_t oilTempC = 0;
     uint8_t fuelLevelPct = 0;      // 01 2F
 
-    // Active gear position indicator ('P','N','D','M' or '1'-'6')
+    // Active gear position indicator ('P','R','N','D','M' or '1'-'6')
     char gear = '-';
+    bool isAutomatic = true;       // True = 6AT Automatic, False = 6MT Manual
+    char tcmPrnd = '-';            // Real TCM / Cluster PRND position
 
     // TPMS (Mode 22 manufacturer)
     float tirePressure[4] = {0, 0, 0, 0}; // bar

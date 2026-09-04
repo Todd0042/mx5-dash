@@ -6,6 +6,7 @@
 
 #include "BleElm.h"
 #include "../mx5_config/Config.h"
+#include "../mx5_config/UserPrefs.h"
 
 #include <cstring>
 #include <cstdio>
@@ -60,19 +61,32 @@ void ObdService::taskMain(void* arg) {
     static_cast<ObdService*>(arg)->loopTask();
 }
 
-// Estimates the active gear from the RPM / speed ratio. Calibrated against the
-// ND2 gearbox + 205/45R17 rubber:
-//   1st ~157 rpm per km/h, 2nd ~92, 3rd ~63, 4th ~49, 5th ~40, 6th ~31.
-static char estimateGear(uint16_t rpm, uint8_t speedKmh) {
+// Estimates the active gear from the RPM / speed ratio and TCM PRND position.
+// Supports both Automatic 6AT (PRND state + 6-speed ratios) and Manual 6MT.
+static char estimateGear(uint16_t rpm, uint8_t speedKmh, bool isAuto, char tcmPrnd) {
     if (rpm == 0 && speedKmh == 0) return '-';   // no signal yet
-    if (speedKmh == 0) return 'N';               // stationary, engine ticking
-    float r = (float)rpm / (float)speedKmh;
-    if (r < 35.0f) return '6';
-    if (r < 45.0f) return '5';
-    if (r < 56.0f) return '4';
-    if (r < 77.0f) return '3';
-    if (r < 125.0f) return '2';
-    return '1';
+    if (isAuto) {
+        if (tcmPrnd == 'R') return 'R';
+        if (tcmPrnd == 'P') return 'P';
+        if (tcmPrnd == 'N') return 'N';
+        if (speedKmh < 2) return (rpm > 400) ? 'P' : '-';
+        float r = (float)rpm / (float)(speedKmh > 0 ? speedKmh : 1);
+        if (r < 35.0f) return '6';
+        if (r < 45.0f) return '5';
+        if (r < 56.0f) return '4';
+        if (r < 77.0f) return '3';
+        if (r < 125.0f) return '2';
+        return '1';
+    } else {
+        if (speedKmh < 3) return (rpm > 400) ? 'N' : '-';
+        float r = (float)rpm / (float)(speedKmh > 0 ? speedKmh : 1);
+        if (r < 35.0f) return '6';
+        if (r < 45.0f) return '5';
+        if (r < 56.0f) return '4';
+        if (r < 77.0f) return '3';
+        if (r < 125.0f) return '2';
+        return '1';
+    }
 }
 
 void ObdService::loopTask() {
@@ -103,7 +117,8 @@ void ObdService::loopTask() {
             portENTER_CRITICAL(&p->mux);
             p->data.connected = true;
             p->data.lastUpdateMs = now;
-            p->data.gear = estimateGear(p->data.rpm, p->data.speedKmh);
+            p->data.isAutomatic = UserPrefs::getTransAuto();
+            p->data.gear = estimateGear(p->data.rpm, p->data.speedKmh, p->data.isAutomatic, p->data.tcmPrnd);
 
             // 1. Live HP & Torque estimations for Skyactiv-G 2.0L (ND2)
             float loadRatio = (float)p->data.engineLoadPct / 100.0f;
@@ -343,38 +358,8 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                 pollTpms(i, now);
                 break;
 
-            // Screen 2: Engine Tachometer -> Fast RPM, Load %, Calibrated Throttle %
+            // Screen 2: Temperatures -> Coolant, Oil Temp, Intake Air, Battery
             case 2:
-                switch (i.slowIdx % 3) {
-                    case 0:
-                        if (readUint16(i, "010C", "0C", tmp)) {
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.rpm = tmp / 4;
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                    case 1:
-                        if (readUint8(i, "0104", "04", b)) {
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                    case 2:
-                        if (readUint8(i, "0111", "11", b)) {
-                            uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
-                            uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
-                            if (eff > 100) eff = 100;
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.throttlePct = eff;
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                }
-                break;
-
-            // Screen 3: Temperatures -> Coolant, Oil Temp, Intake Air, Battery
-            case 3:
                 switch (i.slowIdx % 4) {
                     case 0:
                         if (readUint8(i, "0105", "05", b)) {
@@ -412,7 +397,48 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                 }
                 break;
 
-            // Screen 4: Track & Dynamics -> Calibrated Throttle %, RPM, Load %
+            // Screen 3: Diagnostic Hub -> Trims (STFT/LTFT), FRP, AFR, Spark Timing
+            case 3:
+                switch (i.slowIdx % 5) {
+                    case 0:
+                        if (readUint8(i, "0106", "06", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.shortTermFuelTrimPct = ((float)b - 128.0f) * (100.0f / 128.0f);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 1:
+                        if (readUint8(i, "0107", "07", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.longTermFuelTrimPct = ((float)b - 128.0f) * (100.0f / 128.0f);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 2:
+                        if (readUint16(i, "0123", "23", tmp)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.fuelRailPressurePsi = (uint16_t)((float)tmp * 10.0f * 0.145038f);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 3:
+                        if (readUint16(i, "0124", "24", tmp)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.airFuelRatio = ((float)tmp / 32768.0f) * 14.7f;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 4:
+                        if (readUint8(i, "010E", "0E", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.sparkAdvanceDeg = ((float)b / 2.0f) - 64.0f;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                }
+                break;
+
+            // Screen 4: Track & Dynamics (FAFO) -> Calibrated Throttle %, RPM, Load %
             case 4:
                 switch (i.slowIdx % 3) {
                     case 0:
@@ -442,8 +468,38 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                 }
                 break;
 
-            // Screen 5: Fuel & Trip Economy -> Fuel %, Load %
+            // Screen 5: Engine Tachometer -> Fast RPM, Load %, Calibrated Throttle %
             case 5:
+                switch (i.slowIdx % 3) {
+                    case 0:
+                        if (readUint16(i, "010C", "0C", tmp)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.rpm = tmp / 4;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 1:
+                        if (readUint8(i, "0104", "04", b)) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 2:
+                        if (readUint8(i, "0111", "11", b)) {
+                            uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
+                            uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
+                            if (eff > 100) eff = 100;
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.throttlePct = eff;
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                }
+                break;
+
+            // Screen 6: Fuel & Trip Economy -> Fuel %, Load %
+            case 6:
                 switch (i.slowIdx % 2) {
                     case 0:
                         if (readUint8(i, "012F", "2F", b)) {
@@ -462,7 +518,7 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                 }
                 break;
 
-            // Diagnostic Screens (6, 8-12): Trims (STFT/LTFT), FRP, AFR, Spark Timing
+            // Diagnostic Sub-Screens (8-12): Trims (STFT/LTFT), FRP, AFR, Spark Timing
             default:
                 switch (i.slowIdx % 5) {
                     case 0:
@@ -609,21 +665,38 @@ void ObdService::pollTpms(Impl& i, uint32_t now) {
         }
     }
 
-    // Query Ambient Air Temp DID 220146 while on Header 720
-    if (i.elm.sendQuery("220146", resp, sizeof(resp), 250)) {
+    // Query PRND Selector Position DID 222A27 while on Header 720
+    if (i.elm.sendQuery("222A27", resp, sizeof(resp), 250)) {
         uint8_t ob[1];
-        if (parseMode22Bytes(resp, "0146", ob, 1)) {
-            int16_t temp = (int16_t)ob[0] - 40;
-            if (temp >= -40 && temp <= 55) {
-                portENTER_CRITICAL(&i.mux);
-                i.data.ambientC = (uint8_t)(temp > 0 ? temp : 0);
-                portEXIT_CRITICAL(&i.mux);
+        if (parseMode22Bytes(resp, "2A27", ob, 1)) {
+            char prnd = '-';
+            switch (ob[0]) {
+                case 1: prnd = 'P'; break;
+                case 2: prnd = 'R'; break;
+                case 3: prnd = 'N'; break;
+                case 4: prnd = 'D'; break;
+                case 5: prnd = 'M'; break;
+                default: prnd = '-'; break;
             }
+            portENTER_CRITICAL(&i.mux);
+            i.data.tcmPrnd = prnd;
+            portEXIT_CRITICAL(&i.mux);
         }
     }
 
     // Restore PCM header 7E0
     i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+
+    // Query Ambient Air Temp (Mode 01 PID 46 on PCM 7E0)
+    uint8_t amb = 0;
+    if (readUint8(i, "0146", "46", amb)) {
+        int16_t temp = (int16_t)amb - 40;
+        if (temp >= -40 && temp <= 60) {
+            portENTER_CRITICAL(&i.mux);
+            i.data.ambientC = (uint8_t)(temp > 0 ? temp : 0);
+            portEXIT_CRITICAL(&i.mux);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ static uint8_t  sThemeMode  = 0;
 static uint8_t  sBrightness = 95;
 static bool     sAutoLog    = true;
 static bool     sSpeedMask  = true;
+static bool     sTransAuto  = true; // Default to Automatic (6AT)
 static char     sBlePrefix[32] = MX5_BLE_DEVICE_PREFIX;
 static uint16_t sBleScanTimeout = 5000;
 static char     sPairedMac[20] = "64:8C:BB:1A:08:0A"; // default paired scanner MAC
@@ -36,6 +37,7 @@ void UserPrefs::loadAll() {
     sBrightness = prefs.getUChar("brightness", 95);
     sAutoLog    = prefs.getBool("auto_log",    true);
     sSpeedMask  = prefs.getBool("speed_mask",  true);
+    sTransAuto  = prefs.getBool("trans_auto",  true);
 
     // getString with 3-arg form; apply default if key missing/empty
     size_t n = prefs.getString("ble_prefix", sBlePrefix, sizeof(sBlePrefix));
@@ -118,6 +120,15 @@ void UserPrefs::saveSpeedMask(bool enabled) {
 #endif
 }
 
+void UserPrefs::saveTransAuto(bool isAuto) {
+    sTransAuto = isAuto;
+#ifdef ARDUINO
+    prefs.begin(NS, false);
+    prefs.putBool("trans_auto", isAuto);
+    prefs.end();
+#endif
+}
+
 void UserPrefs::saveBlePrefix(const char* prefix) {
     strncpy(sBlePrefix, prefix, sizeof(sBlePrefix) - 1);
     sBlePrefix[sizeof(sBlePrefix) - 1] = '\0';
@@ -178,6 +189,7 @@ uint8_t  UserPrefs::getThemeMode()      { return sThemeMode; }
 uint8_t  UserPrefs::getBrightness()     { return sBrightness; }
 bool     UserPrefs::getAutoLog()        { return sAutoLog; }
 bool     UserPrefs::getSpeedMask()      { return sSpeedMask; }
+bool     UserPrefs::getTransAuto()      { return sTransAuto; }
 uint16_t UserPrefs::getBleScanTimeout() { return sBleScanTimeout; }
 
 void UserPrefs::getBlePrefix(char* buf, size_t len) {

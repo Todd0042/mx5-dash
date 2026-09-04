@@ -34,6 +34,7 @@ static uint8_t  sThemeMode  = 0;
 static uint8_t  sBrightness = 95;
 static bool     sAutoLog    = true;
 static bool     sSpeedMask  = true;
+static bool     sTransAuto  = true;
 static char     sBlePrefix[32] = MX5_BLE_DEVICE_PREFIX;
 static uint16_t sBleScanTimeout = 5000;
 static bool     sConfigured  = true;
@@ -171,6 +172,10 @@ void UserPrefs::loadAll() {
         jstring kMask = env->NewStringUTF("speed_mask");
         sSpeedMask = env->CallBooleanMethod(gPrefBridgeObj, midGetBool, kMask, (jboolean)sSpeedMask);
         env->DeleteLocalRef(kMask);
+
+        jstring kTrans = env->NewStringUTF("trans_auto");
+        sTransAuto = env->CallBooleanMethod(gPrefBridgeObj, midGetBool, kTrans, (jboolean)sTransAuto);
+        env->DeleteLocalRef(kTrans);
     }
 
     release_env(needDetach);
@@ -207,6 +212,11 @@ void UserPrefs::saveSpeedMask(bool enabled) {
     jni_save_bool("speed_mask", enabled);
 }
 
+void UserPrefs::saveTransAuto(bool isAuto) {
+    sTransAuto = isAuto;
+    jni_save_bool("trans_auto", isAuto);
+}
+
 void UserPrefs::saveBlePrefix(const char* prefix) {
     if (!prefix) return;
     strncpy(sBlePrefix, prefix, sizeof(sBlePrefix) - 1);
@@ -225,6 +235,7 @@ uint8_t  UserPrefs::getThemeMode()      { return sThemeMode; }
 uint8_t  UserPrefs::getBrightness()     { return sBrightness; }
 bool     UserPrefs::getAutoLog()        { return sAutoLog; }
 bool     UserPrefs::getSpeedMask()      { return sSpeedMask; }
+bool     UserPrefs::getTransAuto()      { return sTransAuto; }
 uint16_t UserPrefs::getBleScanTimeout() { return sBleScanTimeout; }
 
 void UserPrefs::getBlePrefix(char* buf, size_t len) {
