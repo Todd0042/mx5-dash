@@ -35,6 +35,9 @@ struct ObdService::Impl {
     uint32_t prevSpeedMs = 0;
     uint32_t lastDimCheckMs = 0;
     uint32_t lastSafetySweepMs = 0;
+    float    tripTotalDistanceMiles = 0.0f;
+    float    tripTotalGallons = 0.0f;
+    uint32_t lastTripCalcMs = 0;
     volatile uint8_t activeScreen_ = 0;
 
     // Setup wizard / calibration state (updated under mux)
@@ -148,19 +151,51 @@ void ObdService::loopTask() {
                 }
             }
 
-            // 3. Instantaneous MPG Estimation
+            // 3. Instantaneous MPG & Trip Economy Integration
+            float speedMph = (float)p->data.speedKmh * 0.621371f;
             if (p->data.speedKmh > 0) {
-                if (p->data.throttlePct == 0) {
+                if (p->data.throttlePct == 0 && p->data.rpm > 1200) {
                     p->data.instantMpg = 60.0f; // Fuel cutoff / engine braking
                 } else {
-                    float speedMph = (float)p->data.speedKmh * 0.621371f;
-                    float fuelRateGph = 0.25f + 0.075f * ((float)p->data.rpm / 1000.0f) * ((float)p->data.engineLoadPct / 100.0f);
+                    float fuelRateGph = 0.22f + 0.075f * ((float)p->data.rpm / 1000.0f) * ((float)p->data.engineLoadPct / 100.0f);
                     float mpg = speedMph / (fuelRateGph > 0.05f ? fuelRateGph : 0.05f);
                     p->data.instantMpg = (mpg > 60.0f) ? 60.0f : mpg;
                 }
             } else {
                 p->data.instantMpg = 0.0f;
             }
+
+            // Trip Accumulator (Distance & Average MPG)
+            if (p->lastTripCalcMs == 0) {
+                p->lastTripCalcMs = now;
+            } else if (now > p->lastTripCalcMs) {
+                float tripDtSec = (float)(now - p->lastTripCalcMs) / 1000.0f;
+                if (tripDtSec >= 0.02f && tripDtSec <= 2.0f) {
+                    p->lastTripCalcMs = now;
+                    float dMiles = speedMph * (tripDtSec / 3600.0f);
+                    p->tripTotalDistanceMiles += dMiles;
+                    p->data.tripDistanceMiles = p->tripTotalDistanceMiles;
+
+                    float fuelRateGph = 0.0f;
+                    if (p->data.speedKmh > 0) {
+                        if (p->data.throttlePct == 0 && p->data.rpm > 1200) {
+                            fuelRateGph = 0.0f;
+                        } else {
+                            fuelRateGph = 0.22f + 0.075f * ((float)p->data.rpm / 1000.0f) * ((float)p->data.engineLoadPct / 100.0f);
+                        }
+                    } else if (p->data.rpm > 400) {
+                        fuelRateGph = 0.20f * ((float)p->data.rpm / 700.0f) * ((float)p->data.engineLoadPct / 20.0f);
+                    }
+                    p->tripTotalGallons += fuelRateGph * (tripDtSec / 3600.0f);
+
+                    if (p->tripTotalGallons > 0.0005f && p->tripTotalDistanceMiles > 0.01f) {
+                        float avg = p->tripTotalDistanceMiles / p->tripTotalGallons;
+                        p->data.tripAvgMpg = (avg > 99.9f) ? 99.9f : avg;
+                    }
+                }
+            }
+
+            p->data.rangeMiles = (p->data.fuelLevelPct > 0) ? (uint16_t)(p->data.fuelLevelPct * 4.2f) : 0;
 
             // 4. Deceleration / Brake Pressure Indicator
             if (p->prevSpeedMs > 0 && now > p->prevSpeedMs) {
@@ -283,6 +318,12 @@ bool ObdService::readUint16(Impl& i, const char* cmd, const char* pidHex, uint16
     return true;
 }
 
+static inline uint8_t parseCalibratedFuel(uint8_t raw) {
+    if (raw <= 8) return 0;
+    uint32_t val = ((uint32_t)(raw - 8) * 100) / 216;
+    return (val > 100) ? 100 : (uint8_t)val;
+}
+
 // ---------------------------------------------------------------------------
 // PID polling - one per cadence expiry, sequenced so only one ELM command is
 // in flight at a time (the dongle is single-command, prompt-terminated).
@@ -312,7 +353,7 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
     uint8_t screen = i.activeScreen_;
     i.slowIdx = (i.slowIdx + 1) % 16;
 
-    // 2. 25-Second Safety Sweep (TPMS + Critical Overheat + Ambient Temp when not on Screen 1)
+    // 2. 25-Second Safety Sweep (TPMS + Critical Overheat + Battery Volts + Ambient Temp when not on Screen 1)
     if (now - i.lastSafetySweepMs > 25000 && screen != 1) {
         i.lastSafetySweepMs = now;
         pollTpms(i, now);
@@ -330,6 +371,12 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                 portEXIT_CRITICAL(&i.mux);
             }
         }
+        uint16_t batTmp = 0;
+        if (readUint16(i, "0142", "42", batTmp)) {
+            portENTER_CRITICAL(&i.mux);
+            i.data.batteryVolts = (float)batTmp / 1000.0f;
+            portEXIT_CRITICAL(&i.mux);
+        }
     } else {
         // 3. View-Driven Command Queue based on active screen
         switch (screen) {
@@ -346,7 +393,7 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                     case 1:
                         if (readUint8(i, "012F", "2F", b)) {
                             portENTER_CRITICAL(&i.mux);
-                            i.data.fuelLevelPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                            i.data.fuelLevelPct = parseCalibratedFuel(b);
                             portEXIT_CRITICAL(&i.mux);
                         }
                         break;
@@ -504,7 +551,7 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                     case 0:
                         if (readUint8(i, "012F", "2F", b)) {
                             portENTER_CRITICAL(&i.mux);
-                            i.data.fuelLevelPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                            i.data.fuelLevelPct = parseCalibratedFuel(b);
                             portEXIT_CRITICAL(&i.mux);
                         }
                         break;

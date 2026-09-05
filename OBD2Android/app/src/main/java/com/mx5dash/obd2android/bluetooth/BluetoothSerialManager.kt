@@ -119,6 +119,12 @@ class BluetoothSerialManager(
     private var lastSafetySweepMs = 0L
     private var tcmPrnd = '-'
 
+    // Trip Integration Accumulator
+    private var tripTotalDistanceMiles = 0.0f
+    private var tripTotalGallons = 0.0f
+    private var liveTripAvgMpg = 0.0f
+    private var lastTripCalcTimeMs = 0L
+
     @SuppressLint("MissingPermission")
     fun start() {
         if (running.get()) return
@@ -266,6 +272,13 @@ class BluetoothSerialManager(
         }
     }
 
+    private fun parseCalibratedFuel(rawByte: Int): Int {
+        // Mazda ND2 fuel sender: ~8 counts at empty reserve to ~224 counts at 100% full
+        if (rawByte <= 8) return 0
+        val pct = ((rawByte - 8) * 100f) / 216f
+        return min(100, max(0, pct.roundToInt()))
+    }
+
     private fun runPollingLoop(sock: BluetoothSocket) {
         val input = sock.inputStream
         val output = sock.outputStream
@@ -277,7 +290,7 @@ class BluetoothSerialManager(
         sendObdCommand(output, input, "ATH0", 150)
         sendObdCommand(output, input, "ATS0", 150)
         sendObdCommand(output, input, "ATAT2", 150)  // Fast adaptive timing
-        sendObdCommand(output, input, "ATST14", 150) // 80ms timeout
+        sendObdCommand(output, input, "ATST32", 150) // 200ms timeout for Mode 22 DIDs
         sendObdCommand(output, input, "ATSP0", 500)  // Auto protocol (ISO 15765-4 CAN 500k)
 
         var screenTick = 0
@@ -339,9 +352,9 @@ class BluetoothSerialManager(
                         if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
                     }
                     1 -> {
-                        val resp = sendObdCommand(output, input, "012F", 80)
+                        val resp = sendObdCommand(output, input, "012F", 90)
                         val bytes = parseHexBytes(resp, "412F")
-                        if (bytes.isNotEmpty()) liveFuelLevelPct = (bytes[0] * 100) / 255
+                        if (bytes.isNotEmpty()) liveFuelLevelPct = parseCalibratedFuel(bytes[0])
                     }
                 }
             }
@@ -407,9 +420,9 @@ class BluetoothSerialManager(
                         if (bytes.isNotEmpty()) liveCoolantC = bytes[0] - 40
                     }
                     1 -> {
-                        val resp = sendObdCommand(output, input, "221310", 90)
+                        val resp = sendObdCommand(output, input, "221310", 200)
                         val bytes = parseHexBytes(resp, "621310")
-                        if (bytes.isNotEmpty()) liveOilTempC = bytes[0] - 40
+                        if (bytes.isNotEmpty() && bytes[0] > 40) liveOilTempC = bytes[0] - 40
                     }
                     2 -> {
                         val resp = sendObdCommand(output, input, "010F", 80)
@@ -417,9 +430,17 @@ class BluetoothSerialManager(
                         if (bytes.isNotEmpty()) liveIntakeC = bytes[0] - 40
                     }
                     3 -> {
-                        val atrvResp = sendObdCommand(output, input, "ATRV", 60)
-                        val v = atrvResp.replace("V", "").replace("v", "").trim().toFloatOrNull()
-                        if (v != null && v > 5f) liveBatVolts = v
+                        // Query Mode 01 PID 42 (ECU Control Module Supply Voltage) with ATRV fallback
+                        val resp = sendObdCommand(output, input, "0142", 100)
+                        val bytes = parseHexBytes(resp, "4142")
+                        if (bytes.size >= 2) {
+                            val v = ((bytes[0] * 256) + bytes[1]) / 1000.0f
+                            if (v > 5f) liveBatVolts = v
+                        } else {
+                            val atrvResp = sendObdCommand(output, input, "ATRV", 80)
+                            val v = atrvResp.replace("V", "").replace("v", "").trim().toFloatOrNull()
+                            if (v != null && v > 5f) liveBatVolts = v
+                        }
                     }
                 }
             }
@@ -492,9 +513,9 @@ class BluetoothSerialManager(
             6 -> {
                 when (tick % 2) {
                     0 -> {
-                        val resp = sendObdCommand(output, input, "012F", 80)
+                        val resp = sendObdCommand(output, input, "012F", 90)
                         val bytes = parseHexBytes(resp, "412F")
-                        if (bytes.isNotEmpty()) liveFuelLevelPct = (bytes[0] * 100) / 255
+                        if (bytes.isNotEmpty()) liveFuelLevelPct = parseCalibratedFuel(bytes[0])
                     }
                     1 -> {
                         val resp = sendObdCommand(output, input, "0104", 80)
@@ -584,8 +605,8 @@ class BluetoothSerialManager(
         val cool = parseHexBytes(sendObdCommand(output, input, "0105", 80), "4105")
         if (cool.isNotEmpty()) liveCoolantC = cool[0] - 40
 
-        val oil = parseHexBytes(sendObdCommand(output, input, "221310", 90), "621310")
-        if (oil.isNotEmpty()) liveOilTempC = oil[0] - 40
+        val oil = parseHexBytes(sendObdCommand(output, input, "221310", 200), "621310")
+        if (oil.isNotEmpty() && oil[0] > 40) liveOilTempC = oil[0] - 40
 
         val amb = parseHexBytes(sendObdCommand(output, input, "0146", 80), "4146")
         if (amb.isNotEmpty()) {
@@ -593,6 +614,17 @@ class BluetoothSerialManager(
             if (temp in -40..60) {
                 liveAmbientC = temp
             }
+        }
+
+        // Battery Voltage on PCM (PID 0142 with ATRV fallback)
+        val batBytes = parseHexBytes(sendObdCommand(output, input, "0142", 100), "4142")
+        if (batBytes.size >= 2) {
+            val v = ((batBytes[0] * 256) + batBytes[1]) / 1000.0f
+            if (v > 5f) liveBatVolts = v
+        } else {
+            val atrvResp = sendObdCommand(output, input, "ATRV", 80)
+            val v = atrvResp.replace("V", "").replace("v", "").trim().toFloatOrNull()
+            if (v != null && v > 5f) liveBatVolts = v
         }
     }
 
@@ -672,9 +704,47 @@ class BluetoothSerialManager(
             }
         }
 
-        val instantMpg = if (liveSpeedKmh > 5) {
-            min(60.0f, max(0.0f, (liveSpeedKmh * 0.621371f) / max(0.1f, (liveEngineLoadPct * 0.04f))))
+        // Instantaneous MPG & Trip Integration
+        val speedMph = liveSpeedKmh * 0.621371f
+        val instantMpg = if (liveSpeedKmh > 0) {
+            if (liveThrottlePct == 0 && liveRpm > 1200) {
+                60.0f // Deceleration Fuel Cut-Off (DFCO)
+            } else {
+                val fuelRateGph = 0.22f + 0.075f * (liveRpm / 1000.0f) * (liveEngineLoadPct / 100.0f)
+                val mpg = speedMph / max(0.05f, fuelRateGph)
+                min(60.0f, max(0.0f, mpg))
+            }
         } else 0.0f
+
+        // Trip Integration Accumulator
+        if (lastTripCalcTimeMs == 0L) {
+            lastTripCalcTimeMs = nowMs
+        } else {
+            val tripDtSec = max(0.01f, min(2.0f, (nowMs - lastTripCalcTimeMs) / 1000.0f))
+            lastTripCalcTimeMs = nowMs
+
+            val deltaMiles = speedMph * (tripDtSec / 3600.0f)
+            tripTotalDistanceMiles += deltaMiles
+
+            val fuelRateGph = if (liveSpeedKmh > 0) {
+                if (liveThrottlePct == 0 && liveRpm > 1200) {
+                    0.0f
+                } else {
+                    max(0.15f, 0.22f + 0.075f * (liveRpm / 1000.0f) * (liveEngineLoadPct / 100.0f))
+                }
+            } else if (liveRpm > 400) {
+                0.20f * max(1.0f, liveRpm / 700.0f) * max(1.0f, liveEngineLoadPct / 20.0f)
+            } else {
+                0.0f
+            }
+
+            val deltaGallons = fuelRateGph * (tripDtSec / 3600.0f)
+            tripTotalGallons += deltaGallons
+
+            if (tripTotalGallons > 0.0005f && tripTotalDistanceMiles > 0.01f) {
+                liveTripAvgMpg = min(99.9f, max(0.0f, tripTotalDistanceMiles / tripTotalGallons))
+            }
+        }
 
         val rangeMiles = if (liveFuelLevelPct > 0) (liveFuelLevelPct * 4.2f).toInt() else 0
 
@@ -684,7 +754,7 @@ class BluetoothSerialManager(
             liveBatVolts, liveEngineLoadPct, liveThrottlePct, liveFuelLevelPct,
             liveGear, liveBrakePct, liveHp, liveTorque,
             accel0to60, best0to60, timerState,
-            instantMpg, 0.0f, 0.0f, rangeMiles,
+            instantMpg, liveTripAvgMpg, tripTotalDistanceMiles, rangeMiles,
             liveAfr, liveStft, liveLtft, liveKnockRetard, liveRailPressurePsi,
             liveSparkAdvance, 0.0f, 0.0f,
             if (liveOilTempC > 0) liveOilTempC - 10 else 0, 0, 0.0f,
