@@ -338,7 +338,7 @@ class BluetoothSerialManager(
         val input = sock.inputStream
         val output = sock.outputStream
 
-        // Initialize ELM327 protocol with fast CAN throughput
+        // Initialize ELM327 protocol for Mazda SkyActiv CAN (ISO 15765-4 CAN 11/500k)
         sendObdCommand(output, input, "ATZ", 600)
         sendObdCommand(output, input, "ATE0", 150)
         sendObdCommand(output, input, "ATL0", 150)
@@ -346,11 +346,12 @@ class BluetoothSerialManager(
         sendObdCommand(output, input, "ATS0", 150)
         sendObdCommand(output, input, "ATAT2", 150)  // Fast adaptive timing
         sendObdCommand(output, input, "ATST32", 150) // 200ms timeout for Mode 22 DIDs
-        sendObdCommand(output, input, "ATSP0", 500)  // Auto protocol (ISO 15765-4 CAN 500k)
+        sendObdCommand(output, input, "ATSP6", 300)  // Direct ISO 15765-4 CAN 11/500k (Fast Mazda CAN)
 
         var screenTick = 0
         var consecutiveTimeouts = 0
         var lastValidResponseMs = System.currentTimeMillis()
+        var isEcuAwake = true
 
         while (running.get() && sock.isConnected) {
             val nowMs = System.currentTimeMillis()
@@ -358,21 +359,66 @@ class BluetoothSerialManager(
             // ================================================================
             // 1. ALWAYS POLL HIGH-PRIORITY: Vehicle Speed (Mode 010D)
             // ================================================================
-            val spdResp = sendObdCommand(output, input, "010D", 90)
+            val spdResp = sendObdCommand(output, input, "010D", 250)
             val spdBytes = parseHexBytes(spdResp, "410D")
+
             if (spdBytes.isNotEmpty()) {
                 liveSpeedKmh = spdBytes[0]
                 consecutiveTimeouts = 0
                 lastValidResponseMs = nowMs
+                if (!isEcuAwake) {
+                    isEcuAwake = true
+                    notifyConnectionState(true, sock.remoteDevice?.name ?: "OBD-II Scanner")
+                }
             } else if (spdResp.isNotEmpty()) {
+                // Dongle replied (e.g. "NO DATA", "BUS INIT", "STOPPED", "CAN ERROR", etc.)
                 consecutiveTimeouts = 0
                 lastValidResponseMs = nowMs
+
+                // If ELM replied NO DATA or CAN bus search timeout, vehicle ignition is OFF
+                if (spdResp.contains("NO DATA", ignoreCase = true) ||
+                    spdResp.contains("UNABLE", ignoreCase = true) ||
+                    spdResp.contains("BUS INIT", ignoreCase = true) ||
+                    spdResp.contains("ERROR", ignoreCase = true) ||
+                    spdResp.contains("STOPPED", ignoreCase = true)) {
+                    if (isEcuAwake) {
+                        isEcuAwake = false
+                        notifyConnectionState(true, "${sock.remoteDevice?.name ?: "OBD-II"} (STANDBY)")
+                    }
+                    pushTelemetrySnapshot(nowMs)
+                    Thread.sleep(1500)
+                    continue
+                }
             } else {
                 consecutiveTimeouts++
             }
 
             // Mandatory thread throttle yield (35ms) to conserve phone battery & prevent vLinker buffer overrun
             Thread.sleep(35)
+
+            // Watchdog check: If 5 consecutive PID timeouts occurred, check adapter heartbeat with ATRV
+            if (consecutiveTimeouts >= 5) {
+                val voltResp = sendObdCommand(output, input, "ATRV", 400)
+                if (voltResp.isNotEmpty() && (voltResp.contains("V", ignoreCase = true) || voltResp.any { it.isDigit() })) {
+                    // Dongle is alive! Car ECU is simply asleep / off.
+                    consecutiveTimeouts = 0
+                    lastValidResponseMs = nowMs
+                    val v = voltResp.replace("V", "").replace("v", "").trim().toFloatOrNull()
+                    if (v != null && v > 5f) liveBatVolts = v
+
+                    if (isEcuAwake) {
+                        isEcuAwake = false
+                        notifyConnectionState(true, "${sock.remoteDevice?.name ?: "OBD-II"} (STANDBY)")
+                    }
+                    pushTelemetrySnapshot(nowMs)
+                    Thread.sleep(1500)
+                    continue
+                } else {
+                    // Dongle itself is unresponsive (e.g. phone call priority preemption or out of range)
+                    Log.w(TAG, "OBD adapter unresponsive to ATRV pulse (resp: '$voltResp'). Link lost, reconnecting.")
+                    throw java.io.IOException("OBD adapter link lost")
+                }
+            }
 
             // ================================================================
             // 2. VIEW-DRIVEN SCREEN-SPECIFIC COMMAND QUEUE
@@ -391,12 +437,6 @@ class BluetoothSerialManager(
             // Signal fresh payload ready if a transition was holding for data
             if (targetTransitionScreen >= 0 && !isFreshPayloadReady) {
                 isFreshPayloadReady = true
-            }
-
-            // Watchdog heartbeat check: if 4 consecutive query cycles returned completely empty or silence > 2500ms
-            if (consecutiveTimeouts >= 4 || (nowMs - lastValidResponseMs > 2500L)) {
-                Log.w(TAG, "OBD query silence ($consecutiveTimeouts consecutive timeouts, ${nowMs - lastValidResponseMs}ms since last reply). Link stalled, forcing reconnect.")
-                throw java.io.IOException("OBD query stream stalled or preempted")
             }
 
             // ================================================================
