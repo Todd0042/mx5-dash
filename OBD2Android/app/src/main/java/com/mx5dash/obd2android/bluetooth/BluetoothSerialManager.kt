@@ -118,6 +118,7 @@ class BluetoothSerialManager(
     private var lastSpeedTimeMs = System.currentTimeMillis()
     private var lastSafetySweepMs = 0L
     private var tcmPrnd = '-'
+    private var tcmDirectGear = '-'
 
     // Trip Integration Accumulator
     private var tripTotalDistanceMiles = 0.0f
@@ -343,10 +344,10 @@ class BluetoothSerialManager(
         tick: Int
     ) {
         when (screen) {
-            // Screen 0: Hero Speedometer -> RPM, Fuel %
+            // Screen 0: Hero Speedometer -> RPM, Fuel %, TCM Direct Gear
             0 -> {
-                when (tick % 2) {
-                    0 -> {
+                when (tick % 4) {
+                    0, 2 -> {
                         val resp = sendObdCommand(output, input, "010C", 80)
                         val bytes = parseHexBytes(resp, "410C")
                         if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
@@ -355,6 +356,22 @@ class BluetoothSerialManager(
                         val resp = sendObdCommand(output, input, "012F", 90)
                         val bytes = parseHexBytes(resp, "412F")
                         if (bytes.isNotEmpty()) liveFuelLevelPct = parseCalibratedFuel(bytes[0])
+                    }
+                    3 -> {
+                        val isAuto = context.getSharedPreferences("sys_prefs", Context.MODE_PRIVATE).getBoolean("trans_auto", true)
+                        if (isAuto) {
+                            sendObdCommand(output, input, "ATSH 7E1", 90)
+                            val tcmResp = sendObdCommand(output, input, "221E12", 90)
+                            val tcmBytes = parseHexBytes(tcmResp, "621E12")
+                            if (tcmBytes.isNotEmpty() && tcmBytes[0] in 1..6) {
+                                tcmDirectGear = ('0'.code + tcmBytes[0]).toChar()
+                            }
+                            sendObdCommand(output, input, "ATSH 7E0", 90)
+                        } else {
+                            val resp = sendObdCommand(output, input, "010C", 80)
+                            val bytes = parseHexBytes(resp, "410C")
+                            if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                        }
                     }
                 }
             }
@@ -638,15 +655,16 @@ class BluetoothSerialManager(
                 tcmPrnd == 'P' -> 'P'
                 tcmPrnd == 'N' -> 'N'
                 liveSpeedKmh < 2 -> if (liveRpm > 400) 'P' else '-'
+                tcmDirectGear in '1'..'6' -> tcmDirectGear
                 else -> {
-                    // Forward Drive Gear Ratio (1..6)
+                    // SkyActiv-Drive RC6A-EL 6AT Physical Gear Ratios (2.866 Final Drive)
                     val r = liveRpm.toFloat() / max(1f, liveSpeedKmh.toFloat())
                     when {
-                        r < 35.0f -> '6'
-                        r < 45.0f -> '5'
-                        r < 56.0f -> '4'
-                        r < 77.0f -> '3'
-                        r < 125.0f -> '2'
+                        r < 16.0f -> '6'
+                        r < 21.0f -> '5'
+                        r < 29.5f -> '4'
+                        r < 42.5f -> '3'
+                        r < 68.0f -> '2'
                         else -> '1'
                     }
                 }
@@ -656,13 +674,14 @@ class BluetoothSerialManager(
                 liveRpm == 0 && liveSpeedKmh == 0 -> '-'
                 liveSpeedKmh < 3 -> if (liveRpm > 400) 'N' else '-'
                 else -> {
+                    // SkyActiv-MT 6MT Physical Gear Ratios (2.866 Final Drive)
                     val r = liveRpm.toFloat() / max(1f, liveSpeedKmh.toFloat())
                     when {
-                        r < 35.0f -> '6'
-                        r < 45.0f -> '5'
-                        r < 56.0f -> '4'
-                        r < 77.0f -> '3'
-                        r < 125.0f -> '2'
+                        r < 28.2f -> '6'
+                        r < 35.5f -> '5'
+                        r < 44.7f -> '4'
+                        r < 62.0f -> '3'
+                        r < 98.0f -> '2'
                         else -> '1'
                     }
                 }

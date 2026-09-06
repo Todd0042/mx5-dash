@@ -38,6 +38,7 @@ struct ObdService::Impl {
     float    tripTotalDistanceMiles = 0.0f;
     float    tripTotalGallons = 0.0f;
     uint32_t lastTripCalcMs = 0;
+    char     tcmDirectGear = '-';
     volatile uint8_t activeScreen_ = 0;
 
     // Setup wizard / calibration state (updated under mux)
@@ -66,28 +67,33 @@ void ObdService::taskMain(void* arg) {
 
 // Estimates the active gear from the RPM / speed ratio and TCM PRND position.
 // Supports both Automatic 6AT (PRND state + 6-speed ratios) and Manual 6MT.
-static char estimateGear(uint16_t rpm, uint8_t speedKmh, bool isAuto, char tcmPrnd) {
+static char estimateGear(uint16_t rpm, uint8_t speedKmh, bool isAuto, char tcmPrnd, char tcmDirectGear = '-') {
     if (rpm == 0 && speedKmh == 0) return '-';   // no signal yet
     if (isAuto) {
         if (tcmPrnd == 'R') return 'R';
         if (tcmPrnd == 'P') return 'P';
         if (tcmPrnd == 'N') return 'N';
         if (speedKmh < 2) return (rpm > 400) ? 'P' : '-';
+        if (tcmDirectGear >= '1' && tcmDirectGear <= '6') return tcmDirectGear;
+
+        // SkyActiv-Drive RC6A-EL 6AT Physical Gear Ratios (2.866 Final Drive)
         float r = (float)rpm / (float)(speedKmh > 0 ? speedKmh : 1);
-        if (r < 35.0f) return '6';
-        if (r < 45.0f) return '5';
-        if (r < 56.0f) return '4';
-        if (r < 77.0f) return '3';
-        if (r < 125.0f) return '2';
+        if (r < 16.0f) return '6';
+        if (r < 21.0f) return '5';
+        if (r < 29.5f) return '4';
+        if (r < 42.5f) return '3';
+        if (r < 68.0f) return '2';
         return '1';
     } else {
         if (speedKmh < 3) return (rpm > 400) ? 'N' : '-';
+
+        // SkyActiv-MT 6MT Physical Gear Ratios (2.866 Final Drive)
         float r = (float)rpm / (float)(speedKmh > 0 ? speedKmh : 1);
-        if (r < 35.0f) return '6';
-        if (r < 45.0f) return '5';
-        if (r < 56.0f) return '4';
-        if (r < 77.0f) return '3';
-        if (r < 125.0f) return '2';
+        if (r < 28.2f) return '6';
+        if (r < 35.5f) return '5';
+        if (r < 44.7f) return '4';
+        if (r < 62.0f) return '3';
+        if (r < 98.0f) return '2';
         return '1';
     }
 }
@@ -121,7 +127,7 @@ void ObdService::loopTask() {
             p->data.connected = true;
             p->data.lastUpdateMs = now;
             p->data.isAutomatic = UserPrefs::getTransAuto();
-            p->data.gear = estimateGear(p->data.rpm, p->data.speedKmh, p->data.isAutomatic, p->data.tcmPrnd);
+            p->data.gear = estimateGear(p->data.rpm, p->data.speedKmh, p->data.isAutomatic, p->data.tcmPrnd, p->tcmDirectGear);
 
             // 1. Live HP & Torque estimations for Skyactiv-G 2.0L (ND2)
             float loadRatio = (float)p->data.engineLoadPct / 100.0f;
@@ -380,10 +386,11 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
     } else {
         // 3. View-Driven Command Queue based on active screen
         switch (screen) {
-            // Screen 0: Hero Speedometer -> RPM, Fuel %
+            // Screen 0: Hero Speedometer -> RPM, Fuel %, TCM Direct Gear
             case 0:
-                switch (i.slowIdx % 2) {
+                switch (i.slowIdx % 4) {
                     case 0:
+                    case 2:
                         if (readUint16(i, "010C", "0C", tmp)) {
                             portENTER_CRITICAL(&i.mux);
                             i.data.rpm = tmp / 4;
@@ -395,6 +402,25 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                             portENTER_CRITICAL(&i.mux);
                             i.data.fuelLevelPct = parseCalibratedFuel(b);
                             portEXIT_CRITICAL(&i.mux);
+                        }
+                        break;
+                    case 3:
+                        if (i.data.isAutomatic) {
+                            char resp[BleElm::MAX_RESPONSE];
+                            i.elm.sendQuery("ATSH 7E1", resp, sizeof(resp), 150);
+                            if (i.elm.sendQuery("221E12", resp, sizeof(resp), 250)) {
+                                uint8_t gb[1];
+                                if (parseMode22Bytes(resp, "1E12", gb, 1) && gb[0] >= 1 && gb[0] <= 6) {
+                                    i.tcmDirectGear = (char)('0' + gb[0]);
+                                }
+                            }
+                            i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+                        } else {
+                            if (readUint16(i, "010C", "0C", tmp)) {
+                                portENTER_CRITICAL(&i.mux);
+                                i.data.rpm = tmp / 4;
+                                portEXIT_CRITICAL(&i.mux);
+                            }
                         }
                         break;
                 }
