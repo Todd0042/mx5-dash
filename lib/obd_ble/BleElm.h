@@ -66,6 +66,7 @@ public:
     bool sendQuery(const char* cmd, char* out, size_t maxLen, uint32_t timeoutMs);
 
     void flush();
+    void teardown();
 
 private:
     friend class BleElmScanCallbacks;
@@ -74,7 +75,6 @@ private:
     bool discoverGatt();
     bool initAdapter();
     bool waitForPrompt(uint32_t timeoutMs);
-    void teardown();
 
     static void notifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify);
 

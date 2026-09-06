@@ -44,10 +44,11 @@ class MainActivity : AppCompatActivity() {
 
     private val connectionListener: (Boolean, String) -> Unit = { connected, label ->
         runOnUiThread {
+            statusPill.animate().cancel()
+            statusPill.alpha = 1.0f
+            statusPill.visibility = View.VISIBLE
+
             if (connected) {
-                statusPill.animate().cancel()
-                statusPill.alpha = 1.0f
-                statusPill.visibility = View.VISIBLE
                 statusPill.text = "LIVE OBD-II • $label"
                 statusPill.setTextColor(ContextCompat.getColor(this, R.color.mx5_ok))
 
@@ -65,11 +66,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }, 3000)
             } else {
-                statusPill.animate().cancel()
-                statusPill.alpha = 1.0f
-                statusPill.visibility = View.VISIBLE
                 statusPill.text = label
-                statusPill.setTextColor(ContextCompat.getColor(this, R.color.mx5_dim))
+                val isWarn = label.contains("DISCONNECTED", ignoreCase = true) ||
+                             label.contains("RECONNECTING", ignoreCase = true)
+                statusPill.setTextColor(
+                    ContextCompat.getColor(this, if (isWarn) R.color.mx5_accent else R.color.mx5_dim)
+                )
             }
         }
     }
@@ -84,7 +86,11 @@ class MainActivity : AppCompatActivity() {
         statusPill.visibility = View.VISIBLE
         statusPill.text = "SEARCHING FOR OBD-II SCANNER…"
         statusPill.setOnClickListener {
-            statusPill.visibility = View.GONE
+            if (!app.bluetoothManager.isConnected) {
+                statusPill.text = "RECONNECTING TO OBD-II SCANNER…"
+                statusPill.setTextColor(ContextCompat.getColor(this, R.color.mx5_accent))
+                app.bluetoothManager.reconnectNow()
+            }
         }
 
         app.bluetoothManager.addConnectionListener(connectionListener)

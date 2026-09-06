@@ -258,6 +258,12 @@ private:
 
     // sub-screen 11: I/M smog readiness monitors
     lv_obj_t* smogSummaryLbl_ = nullptr;
+
+    // global top connection status pill
+    lv_obj_t* connStatusPill_ = nullptr;
+    lv_obj_t* connStatusLbl_ = nullptr;
+    uint32_t connConnectedSinceMs_ = 0;
+    bool wasConnected_ = false;
     lv_obj_t* smogPodDot_[8] = {};
     lv_obj_t* smogPodLbl_[8] = {};
 

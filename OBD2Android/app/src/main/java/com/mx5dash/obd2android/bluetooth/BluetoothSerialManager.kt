@@ -126,10 +126,43 @@ class BluetoothSerialManager(
     private var liveTripAvgMpg = 0.0f
     private var lastTripCalcTimeMs = 0L
 
+    private var isReceiverRegistered = false
+    private val btStateReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context?, intent: android.content.Intent?) {
+            val action = intent?.action ?: return
+            if (action == BluetoothDevice.ACTION_ACL_DISCONNECTED ||
+                action == BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED ||
+                action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                Log.w(TAG, "Bluetooth hardware/link state change ($action). Reconnecting...")
+                reconnectNow()
+            }
+        }
+    }
+
+    fun reconnectNow() {
+        try { socket?.close() } catch (_: Exception) {}
+        socket = null
+        workerThread?.interrupt()
+    }
+
     @SuppressLint("MissingPermission")
     fun start() {
         if (running.get()) return
         running.set(true)
+
+        if (!isReceiverRegistered) {
+            val filter = android.content.IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+                addAction(BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED)
+                addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+            }
+            try {
+                context.registerReceiver(btStateReceiver, filter)
+                isReceiverRegistered = true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to register BT receiver: ${e.message}")
+            }
+        }
 
         workerThread = Thread({
             dataLogger.startSession()
@@ -139,16 +172,34 @@ class BluetoothSerialManager(
                     val device = findTargetDevice()
                     if (device == null) {
                         notifyConnectionState(false, "SEARCHING FOR OBD-II SCANNER…")
+                        pushDisconnectedSnapshot()
                         Thread.sleep(2000)
                         continue
                     }
 
                     notifyConnectionState(false, "CONNECTING TO ${device.name}…")
+                    pushDisconnectedSnapshot()
                     Log.i(TAG, "Attempting connection to ${device.name} (${device.address})")
 
-                    val sock = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                    socket = sock
-                    sock.connect()
+                    val adapter = BluetoothAdapter.getDefaultAdapter()
+                    if (adapter != null && adapter.isEnabled) {
+                        try { adapter.cancelDiscovery() } catch (_: Exception) {}
+                    }
+
+                    var sock: BluetoothSocket? = null
+                    try {
+                        sock = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                        socket = sock
+                        sock.connect()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Standard SPP connection failed (${e.message}), attempting RFCOMM channel 1 fallback...")
+                        try { sock?.close() } catch (_: Exception) {}
+                        val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                        val fallbackSock = m.invoke(device, 1) as BluetoothSocket
+                        socket = fallbackSock
+                        fallbackSock.connect()
+                        sock = fallbackSock
+                    }
 
                     consecutiveFailures = 0
                     telemetrySimulator.stop()
@@ -174,17 +225,17 @@ class BluetoothSerialManager(
         socket = null
 
         consecutiveFailures++
-        // Exponential backoff: 1s, 2s, 4s, 8s, up to 10s max
-        val backoffMs = min(10000L, 1000L * (1L shl min(consecutiveFailures - 1, 3)))
+        val backoffMs = min(5000L, 1000L * min(consecutiveFailures, 5))
         Log.e(TAG, "Serial connection error. Silent backoff delay: ${backoffMs}ms (attempt $consecutiveFailures)...")
-        notifyConnectionState(false, "RECONNECTING TO OBD-II SCANNER…")
+        notifyConnectionState(false, "OBD-II DISCONNECTED • RECONNECTING…")
+        pushDisconnectedSnapshot()
         telemetrySimulator.start()
 
         if (running.get()) {
             try {
                 Thread.sleep(backoffMs)
             } catch (_: InterruptedException) {
-                // Thread interrupted
+                // Thread interrupted for immediate retry
             }
         }
     }
@@ -231,6 +282,9 @@ class BluetoothSerialManager(
             if (avail > 0) {
                 val toRead = min(avail, byteBuf.size)
                 val readCount = input.read(byteBuf, 0, toRead)
+                if (readCount < 0) {
+                    throw java.io.IOException("RFCOMM socket stream closed by remote host")
+                }
                 if (readCount > 0) {
                     for (i in 0 until readCount) {
                         val ch = byteBuf[i].toInt().toChar()
@@ -295,6 +349,8 @@ class BluetoothSerialManager(
         sendObdCommand(output, input, "ATSP0", 500)  // Auto protocol (ISO 15765-4 CAN 500k)
 
         var screenTick = 0
+        var consecutiveTimeouts = 0
+        var lastValidResponseMs = System.currentTimeMillis()
 
         while (running.get() && sock.isConnected) {
             val nowMs = System.currentTimeMillis()
@@ -306,6 +362,13 @@ class BluetoothSerialManager(
             val spdBytes = parseHexBytes(spdResp, "410D")
             if (spdBytes.isNotEmpty()) {
                 liveSpeedKmh = spdBytes[0]
+                consecutiveTimeouts = 0
+                lastValidResponseMs = nowMs
+            } else if (spdResp.isNotEmpty()) {
+                consecutiveTimeouts = 0
+                lastValidResponseMs = nowMs
+            } else {
+                consecutiveTimeouts++
             }
 
             // Mandatory thread throttle yield (35ms) to conserve phone battery & prevent vLinker buffer overrun
@@ -328,6 +391,12 @@ class BluetoothSerialManager(
             // Signal fresh payload ready if a transition was holding for data
             if (targetTransitionScreen >= 0 && !isFreshPayloadReady) {
                 isFreshPayloadReady = true
+            }
+
+            // Watchdog heartbeat check: if 4 consecutive query cycles returned completely empty or silence > 2500ms
+            if (consecutiveTimeouts >= 4 || (nowMs - lastValidResponseMs > 2500L)) {
+                Log.w(TAG, "OBD query silence ($consecutiveTimeouts consecutive timeouts, ${nowMs - lastValidResponseMs}ms since last reply). Link stalled, forcing reconnect.")
+                throw java.io.IOException("OBD query stream stalled or preempted")
             }
 
             // ================================================================
@@ -798,8 +867,31 @@ class BluetoothSerialManager(
         )
     }
 
+    private fun pushDisconnectedSnapshot() {
+        val rangeMiles = if (liveFuelLevelPct > 0) (liveFuelLevelPct * 4.2f).toInt() else 0
+        NativeBridge.nativeUpdateFullTelemetry(
+            liveRpm, liveSpeedKmh, liveCoolantC, liveOilTempC, liveIntakeC, liveAmbientC,
+            liveBatVolts, liveEngineLoadPct, liveThrottlePct, liveFuelLevelPct,
+            liveGear, 0, liveHp, liveTorque,
+            accel0to60, best0to60, timerState,
+            0.0f, liveTripAvgMpg, tripTotalDistanceMiles, rangeMiles,
+            liveAfr, liveStft, liveLtft, liveKnockRetard, liveRailPressurePsi,
+            liveSparkAdvance, 0.0f, 0.0f,
+            if (liveOilTempC > 0) liveOilTempC - 10 else 0, 0, 0.0f,
+            flPsi, frPsi, rlPsi, rrPsi,
+            flTemp, frTemp, rlTemp, rrTemp,
+            0, false, false
+        )
+    }
+
     fun stop() {
         running.set(false)
+        if (isReceiverRegistered) {
+            try {
+                context.unregisterReceiver(btStateReceiver)
+            } catch (_: Exception) {}
+            isReceiverRegistered = false
+        }
         try { socket?.close() } catch (_: Exception) {}
         socket = null
         workerThread?.interrupt()

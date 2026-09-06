@@ -445,12 +445,57 @@ void Mx5UI::begin() {
         lv_obj_add_event_cb(screens_[i], onScreenEvent, LV_EVENT_GESTURE, this);
     }
 
+    // Global connection status pill on top layer (visible across all screens)
+    connStatusPill_ = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(connStatusPill_);
+    lv_obj_set_size(connStatusPill_, 230, 26);
+    lv_obj_set_pos(connStatusPill_, 125, 6);
+    lv_obj_set_style_bg_color(connStatusPill_, lv_color_hex(0x15161A), 0);
+    lv_obj_set_style_bg_opa(connStatusPill_, LV_OPA_90, 0);
+    lv_obj_set_style_radius(connStatusPill_, 13, 0);
+    lv_obj_set_style_border_color(connStatusPill_, C_ACCENT, 0);
+    lv_obj_set_style_border_width(connStatusPill_, 1, 0);
+    lockNoScroll(connStatusPill_);
+
+    connStatusLbl_ = lv_label_create(connStatusPill_);
+    lv_obj_set_style_text_font(connStatusLbl_, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(connStatusLbl_, C_WARN, 0);
+    lv_label_set_text(connStatusLbl_, "SEARCHING FOR OBD-II...");
+    lv_obj_center(connStatusLbl_);
+    lockNoScroll(connStatusLbl_);
+
     // Speedometer is the default home screen
     setScreen(SCREEN_SPEED);
 }
 
 void Mx5UI::update() {
     obd_.snapshot(data_local_);
+
+    // Update global connection status pill
+    if (connStatusPill_ && connStatusLbl_) {
+        uint32_t now = lv_tick_get();
+        if (data_local_.connected) {
+            if (!wasConnected_) {
+                wasConnected_ = true;
+                connConnectedSinceMs_ = now;
+                lv_obj_remove_flag(connStatusPill_, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_style_border_color(connStatusPill_, C_OK, 0);
+                lv_obj_set_style_text_color(connStatusLbl_, C_OK, 0);
+                lv_label_set_text(connStatusLbl_, "LIVE OBD-II • CONNECTED");
+            } else {
+                // Auto-fade / hide after 3 seconds of continuous connection
+                if (now - connConnectedSinceMs_ > 3000) {
+                    lv_obj_add_flag(connStatusPill_, LV_OBJ_FLAG_HIDDEN);
+                }
+            }
+        } else {
+            wasConnected_ = false;
+            lv_obj_remove_flag(connStatusPill_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_border_color(connStatusPill_, C_ACCENT, 0);
+            lv_obj_set_style_text_color(connStatusLbl_, C_WARN, 0);
+            lv_label_set_text(connStatusLbl_, "DISCONNECTED • RECONNECTING...");
+        }
+    }
 
     // Shared sticky speed chip
     updateSpeedChip();

@@ -648,11 +648,20 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
         }
     }
 
-    // surface consecutive poll failures to the diagnostics screen
+    // surface consecutive poll failures to the diagnostics screen and trigger watchdog reconnect
     {
         portENTER_CRITICAL(&i.mux);
         i.data.canError = i.pollErrors > 3;
+        if (i.pollErrors >= 6) {
+            i.data.connected = false;
+        }
         portEXIT_CRITICAL(&i.mux);
+
+        if (i.pollErrors >= 6) {
+            Serial.printf("[obdService] Watchdog: %u consecutive query timeouts. Resetting BLE connection...\n", (unsigned int)i.pollErrors);
+            i.elm.teardown();
+            i.pollErrors = 0;
+        }
     }
 }
 
