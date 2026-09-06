@@ -370,10 +370,17 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
         }
         char resp[BleElm::MAX_RESPONSE];
         if (i.elm.sendQuery("221310", resp, sizeof(resp), 400)) {
-            uint8_t ob[1];
-            if (parseMode22Bytes(resp, "1310", ob, 1)) {
+            uint8_t ob[2];
+            if (parseMode22Bytes(resp, "1310", ob, 2)) {
+                float tempC = (((float)((ob[0] << 8) | ob[1])) / 100.0f) - 40.0f;
+                if (tempC >= 0.0f && tempC <= 160.0f) {
+                    portENTER_CRITICAL(&i.mux);
+                    i.data.oilTempC = (uint8_t)(tempC + 0.5f);
+                    portEXIT_CRITICAL(&i.mux);
+                }
+            } else if (parseMode22Bytes(resp, "1310", ob, 1) && ob[0] > 40) {
                 portENTER_CRITICAL(&i.mux);
-                i.data.oilTempC = (ob[0] > 40) ? (ob[0] - 40) : 0;
+                i.data.oilTempC = ob[0] - 40;
                 portEXIT_CRITICAL(&i.mux);
             }
         }
@@ -444,10 +451,17 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                     case 1: {
                         char resp[BleElm::MAX_RESPONSE];
                         if (i.elm.sendQuery("221310", resp, sizeof(resp), 400)) {
-                            uint8_t ob[1];
-                            if (parseMode22Bytes(resp, "1310", ob, 1)) {
+                            uint8_t ob[2];
+                            if (parseMode22Bytes(resp, "1310", ob, 2)) {
+                                float tempC = (((float)((ob[0] << 8) | ob[1])) / 100.0f) - 40.0f;
+                                if (tempC >= 0.0f && tempC <= 160.0f) {
+                                    portENTER_CRITICAL(&i.mux);
+                                    i.data.oilTempC = (uint8_t)(tempC + 0.5f);
+                                    portEXIT_CRITICAL(&i.mux);
+                                }
+                            } else if (parseMode22Bytes(resp, "1310", ob, 1) && ob[0] > 40) {
                                 portENTER_CRITICAL(&i.mux);
-                                i.data.oilTempC = (ob[0] > 40) ? (ob[0] - 40) : 0;
+                                i.data.oilTempC = ob[0] - 40;
                                 portEXIT_CRITICAL(&i.mux);
                             }
                         }

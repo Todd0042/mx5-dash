@@ -439,7 +439,12 @@ class BluetoothSerialManager(
                     1 -> {
                         val resp = sendObdCommand(output, input, "221310", 200)
                         val bytes = parseHexBytes(resp, "621310")
-                        if (bytes.isNotEmpty() && bytes[0] > 40) liveOilTempC = bytes[0] - 40
+                        if (bytes.size >= 2) {
+                            val tempC = (((bytes[0] * 256) + bytes[1]) / 100.0f) - 40.0f
+                            if (tempC in 0.0f..160.0f) liveOilTempC = tempC.roundToInt()
+                        } else if (bytes.isNotEmpty() && bytes[0] > 40) {
+                            liveOilTempC = bytes[0] - 40
+                        }
                     }
                     2 -> {
                         val resp = sendObdCommand(output, input, "010F", 80)
@@ -623,7 +628,12 @@ class BluetoothSerialManager(
         if (cool.isNotEmpty()) liveCoolantC = cool[0] - 40
 
         val oil = parseHexBytes(sendObdCommand(output, input, "221310", 200), "621310")
-        if (oil.isNotEmpty() && oil[0] > 40) liveOilTempC = oil[0] - 40
+        if (oil.size >= 2) {
+            val tempC = (((oil[0] * 256) + oil[1]) / 100.0f) - 40.0f
+            if (tempC in 0.0f..160.0f) liveOilTempC = tempC.roundToInt()
+        } else if (oil.isNotEmpty() && oil[0] > 40) {
+            liveOilTempC = oil[0] - 40
+        }
 
         val amb = parseHexBytes(sendObdCommand(output, input, "0146", 80), "4146")
         if (amb.isNotEmpty()) {
