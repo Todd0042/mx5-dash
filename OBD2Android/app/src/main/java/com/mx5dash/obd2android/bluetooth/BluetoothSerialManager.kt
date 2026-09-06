@@ -498,7 +498,7 @@ class BluetoothSerialManager(
             }
             // Screen 4: Track & Dynamics (FAFO) -> Throttle %, RPM, Load %
             4 -> {
-                when (tick % 2) {
+                when (tick % 3) {
                     0 -> {
                         val resp = sendObdCommand(output, input, "0111", 80)
                         val bytes = parseHexBytes(resp, "4111")
@@ -508,6 +508,11 @@ class BluetoothSerialManager(
                         val resp = sendObdCommand(output, input, "010C", 80)
                         val bytes = parseHexBytes(resp, "410C")
                         if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                    }
+                    2 -> {
+                        val resp = sendObdCommand(output, input, "0104", 80)
+                        val bytes = parseHexBytes(resp, "4104")
+                        if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
                     }
                 }
             }

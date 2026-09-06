@@ -188,9 +188,9 @@ private:
     lv_obj_t* trackBestLbl_ = nullptr;
     lv_obj_t* trackStateBadge_ = nullptr;
     lv_obj_t* trackThrottleBar_ = nullptr;
-    lv_obj_t* trackBrakeBar_ = nullptr;
+    lv_obj_t* trackLoadBar_ = nullptr;
     lv_obj_t* trackThrottleVal_ = nullptr;
-    lv_obj_t* trackBrakeVal_ = nullptr;
+    lv_obj_t* trackLoadVal_ = nullptr;
     SegArc hpSeg_, torqueSeg_;
 
     // screen 5: trip

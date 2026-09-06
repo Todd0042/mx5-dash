@@ -818,7 +818,7 @@ lv_obj_t* AndroidMx5UI::buildTrackScreen() {
     lv_obj_t* pTag = lv_label_create(pedalCard);
     lv_obj_set_style_text_font(pTag, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(pTag, C_CHROME, 0);
-    lv_label_set_text(pTag, "PEDAL INPUTS");
+    lv_label_set_text(pTag, "POWERTRAIN DEMAND");
     lv_obj_align(pTag, LV_ALIGN_TOP_MID, 0, 10);
     lockNoScroll(pTag);
 
@@ -850,33 +850,33 @@ lv_obj_t* AndroidMx5UI::buildTrackScreen() {
     lv_obj_align_to(trackThrottleVal_, trackThrottleBar_, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
     lockNoScroll(trackThrottleVal_);
 
-    // Brake Column (Right: x=128, w=60)
-    lv_obj_t* brkLbl = lv_label_create(pedalCard);
-    lv_obj_set_style_text_font(brkLbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(brkLbl, C_DIM, 0);
-    lv_label_set_text(brkLbl, "BRK");
-    lv_obj_set_pos(brkLbl, 144, 32);
-    lockNoScroll(brkLbl);
+    // Engine Load Column (Right: x=128, w=60)
+    lv_obj_t* loadLbl = lv_label_create(pedalCard);
+    lv_obj_set_style_text_font(loadLbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(loadLbl, C_DIM, 0);
+    lv_label_set_text(loadLbl, "LOAD");
+    lv_obj_set_pos(loadLbl, 138, 32);
+    lockNoScroll(loadLbl);
 
-    trackBrakeBar_ = lv_bar_create(pedalCard);
-    lv_obj_remove_style_all(trackBrakeBar_);
-    lv_obj_set_size(trackBrakeBar_, 60, 160);
-    lv_obj_set_pos(trackBrakeBar_, 128, 54);
-    lv_obj_set_style_bg_color(trackBrakeBar_, C_DOT_UNLIT, 0);
-    lv_obj_set_style_bg_opa(trackBrakeBar_, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(trackBrakeBar_, 8, 0);
-    lv_obj_set_style_bg_color(trackBrakeBar_, C_WARN, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(trackBrakeBar_, LV_OPA_COVER, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(trackBrakeBar_, 8, LV_PART_INDICATOR);
-    lv_bar_set_range(trackBrakeBar_, 0, 100);
-    lockNoScroll(trackBrakeBar_);
+    trackLoadBar_ = lv_bar_create(pedalCard);
+    lv_obj_remove_style_all(trackLoadBar_);
+    lv_obj_set_size(trackLoadBar_, 60, 160);
+    lv_obj_set_pos(trackLoadBar_, 128, 54);
+    lv_obj_set_style_bg_color(trackLoadBar_, C_DOT_UNLIT, 0);
+    lv_obj_set_style_bg_opa(trackLoadBar_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(trackLoadBar_, 8, 0);
+    lv_obj_set_style_bg_color(trackLoadBar_, C_WARN, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(trackLoadBar_, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(trackLoadBar_, 8, LV_PART_INDICATOR);
+    lv_bar_set_range(trackLoadBar_, 0, 100);
+    lockNoScroll(trackLoadBar_);
 
-    trackBrakeVal_ = lv_label_create(pedalCard);
-    lv_obj_set_style_text_font(trackBrakeVal_, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(trackBrakeVal_, C_SPEED, 0);
-    lv_label_set_text(trackBrakeVal_, "0%");
-    lv_obj_align_to(trackBrakeVal_, trackBrakeBar_, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
-    lockNoScroll(trackBrakeVal_);
+    trackLoadVal_ = lv_label_create(pedalCard);
+    lv_obj_set_style_text_font(trackLoadVal_, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(trackLoadVal_, C_SPEED, 0);
+    lv_label_set_text(trackLoadVal_, "0%");
+    lv_obj_align_to(trackLoadVal_, trackLoadBar_, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+    lockNoScroll(trackLoadVal_);
 
     return scr;
 }
@@ -2572,8 +2572,8 @@ void AndroidMx5UI::updateTrackScreen() {
     if (trackThrottleBar_) lv_bar_set_value(trackThrottleBar_, data_local_.throttlePct, LV_ANIM_OFF);
     if (trackThrottleVal_) lv_label_set_text_fmt(trackThrottleVal_, "%u%%", data_local_.throttlePct);
 
-    if (trackBrakeBar_) lv_bar_set_value(trackBrakeBar_, data_local_.brakePressurePct, LV_ANIM_OFF);
-    if (trackBrakeVal_) lv_label_set_text_fmt(trackBrakeVal_, "%u%%", data_local_.brakePressurePct);
+    if (trackLoadBar_) lv_bar_set_value(trackLoadBar_, data_local_.engineLoadPct, LV_ANIM_OFF);
+    if (trackLoadVal_) lv_label_set_text_fmt(trackLoadVal_, "%u%%", data_local_.engineLoadPct);
 }
 
 void AndroidMx5UI::updateTripScreen() {

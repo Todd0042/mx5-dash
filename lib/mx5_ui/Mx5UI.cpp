@@ -984,7 +984,7 @@ lv_obj_t* Mx5UI::buildTrackScreen() {
     lv_obj_t* pTag = lv_label_create(pedalCard);
     lv_obj_set_style_text_font(pTag, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(pTag, C_CHROME, 0);
-    lv_label_set_text(pTag, "PEDAL INPUTS");
+    lv_label_set_text(pTag, "POWERTRAIN DEMAND");
     lv_obj_align(pTag, LV_ALIGN_TOP_MID, 0, 8);
     lockNoScroll(pTag);
 
@@ -1016,33 +1016,33 @@ lv_obj_t* Mx5UI::buildTrackScreen() {
     lv_obj_align_to(trackThrottleVal_, trackThrottleBar_, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
     lockNoScroll(trackThrottleVal_);
 
-    // Brake Column (Right: x=70, w=38)
-    lv_obj_t* brkLbl = lv_label_create(pedalCard);
-    lv_obj_set_style_text_font(brkLbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(brkLbl, C_DIM, 0);
-    lv_label_set_text(brkLbl, "BRK");
-    lv_obj_set_pos(brkLbl, 76, 28);
-    lockNoScroll(brkLbl);
+    // Engine Load Column (Right: x=70, w=38)
+    lv_obj_t* loadLbl = lv_label_create(pedalCard);
+    lv_obj_set_style_text_font(loadLbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(loadLbl, C_DIM, 0);
+    lv_label_set_text(loadLbl, "LOAD");
+    lv_obj_set_pos(loadLbl, 72, 28);
+    lockNoScroll(loadLbl);
 
-    trackBrakeBar_ = lv_bar_create(pedalCard);
-    lv_obj_remove_style_all(trackBrakeBar_);
-    lv_obj_set_size(trackBrakeBar_, 38, 134);
-    lv_obj_set_pos(trackBrakeBar_, 70, 48);
-    lv_obj_set_style_bg_color(trackBrakeBar_, C_DOT_UNLIT, 0);
-    lv_obj_set_style_bg_opa(trackBrakeBar_, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(trackBrakeBar_, 6, 0);
-    lv_obj_set_style_bg_color(trackBrakeBar_, C_WARN, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(trackBrakeBar_, LV_OPA_COVER, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(trackBrakeBar_, 6, LV_PART_INDICATOR);
-    lv_bar_set_range(trackBrakeBar_, 0, 100);
-    lockNoScroll(trackBrakeBar_);
+    trackLoadBar_ = lv_bar_create(pedalCard);
+    lv_obj_remove_style_all(trackLoadBar_);
+    lv_obj_set_size(trackLoadBar_, 38, 134);
+    lv_obj_set_pos(trackLoadBar_, 70, 48);
+    lv_obj_set_style_bg_color(trackLoadBar_, C_DOT_UNLIT, 0);
+    lv_obj_set_style_bg_opa(trackLoadBar_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(trackLoadBar_, 6, 0);
+    lv_obj_set_style_bg_color(trackLoadBar_, C_WARN, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(trackLoadBar_, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(trackLoadBar_, 6, LV_PART_INDICATOR);
+    lv_bar_set_range(trackLoadBar_, 0, 100);
+    lockNoScroll(trackLoadBar_);
 
-    trackBrakeVal_ = lv_label_create(pedalCard);
-    lv_obj_set_style_text_font(trackBrakeVal_, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(trackBrakeVal_, C_SPEED, 0);
-    lv_label_set_text(trackBrakeVal_, "0%");
-    lv_obj_align_to(trackBrakeVal_, trackBrakeBar_, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
-    lockNoScroll(trackBrakeVal_);
+    trackLoadVal_ = lv_label_create(pedalCard);
+    lv_obj_set_style_text_font(trackLoadVal_, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(trackLoadVal_, C_SPEED, 0);
+    lv_label_set_text(trackLoadVal_, "0%");
+    lv_obj_align_to(trackLoadVal_, trackLoadBar_, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
+    lockNoScroll(trackLoadVal_);
 
     return scr;
 }
@@ -1740,12 +1740,12 @@ void Mx5UI::updateTrackScreen() {
     updateDottedValue(torqueSeg_, (float)data_local_.estTorqueFtLb / 200.0f);
     lv_label_set_text_fmt(torqueSeg_.val, "%d lb-ft", data_local_.estTorqueFtLb);
 
-    // Throttle & Brake pedal response bars
+    // Throttle & Engine Load response bars
     lv_bar_set_value(trackThrottleBar_, data_local_.throttlePct, LV_ANIM_OFF);
     lv_label_set_text_fmt(trackThrottleVal_, "%d%%", data_local_.throttlePct);
 
-    lv_bar_set_value(trackBrakeBar_, data_local_.brakePressurePct, LV_ANIM_OFF);
-    lv_label_set_text_fmt(trackBrakeVal_, "%d%%", data_local_.brakePressurePct);
+    lv_bar_set_value(trackLoadBar_, data_local_.engineLoadPct, LV_ANIM_OFF);
+    lv_label_set_text_fmt(trackLoadVal_, "%d%%", data_local_.engineLoadPct);
 }
 
 void Mx5UI::updateTripScreen() {
@@ -3238,7 +3238,7 @@ void Mx5UI::applyThemeMode(bool isNight) {
     // Track metrics
     if (trackTimerLbl_)    lv_obj_set_style_text_color(trackTimerLbl_, themeSpeed_, 0);
     if (trackThrottleVal_) lv_obj_set_style_text_color(trackThrottleVal_, themeText_, 0);
-    if (trackBrakeVal_)    lv_obj_set_style_text_color(trackBrakeVal_, themeText_, 0);
+    if (trackLoadVal_)     lv_obj_set_style_text_color(trackLoadVal_, themeText_, 0);
 
     // Diagnostic metrics
     if (diagAfrVal_)      lv_obj_set_style_text_color(diagAfrVal_, themeSpeed_, 0);
