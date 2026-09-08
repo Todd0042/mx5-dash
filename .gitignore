@@ -31,6 +31,17 @@ OBD2Android/app/*.iml
 OBD2Android/.kotlin/
 OBD2Android/captures/
 
+# Vendored lib non-build assets (datasheets, examples, extras)
+lib/*/datasheet/
+lib/*/examples/
+lib/*/tools/
+lib/*/extras/
+lib/*/Micropython/
+
+# Scratch / screenshots
+display.avif
+src/*.bak
+
 # OS / editor
 .DS_Store
 Thumbs.db

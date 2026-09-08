@@ -30,6 +30,7 @@ public:
 
     static void setRotation(uint8_t rotation);
     static uint8_t getRotation();
+    static bool is35B() { return isModelB_; }
 
 private:
     void initPower();
@@ -39,4 +40,6 @@ private:
 
     static void my_disp_flush(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map);
     static void my_touchpad_read(lv_indev_t* indev, lv_indev_data_t* data);
+
+    static bool isModelB_;
 };

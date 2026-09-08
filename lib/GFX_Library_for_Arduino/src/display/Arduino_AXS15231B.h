@@ -1,38 +1,52 @@
 /*
- * Minimal AXS15231B panel driver for the Waveshare ESP32-S3-Touch-LCD-3.5B.
- *
- * GFX pinned to 1.4.0 (matched to Arduino core 3.20017 / no esp32-hal-periman)
- * ships no Arduino_AXS15231B class. Rather than cascading a full core/platform
- * upgrade, we subclass the library's generic panel base class (Arduino_TFT) and
- * drive the panel with the manufacturer init command sequence pasted below.
+ * start rewrite from:
+ * https://github.com/adafruit/Adafruit-GFX-Library.git
+ * https://github.com/ananevilya/Arduino-AXS15231B-Library.git
  */
-#pragma once
+#ifndef _ARDUINO_AXS15231B_H_
+#define _ARDUINO_AXS15231B_H_
 
-#include <Arduino_GFX_Library.h>
+#include "../Arduino_GFX.h"
+#include "../Arduino_TFT.h"
 
-#define AXS15231B_RST_DELAY 200
-#define AXS15231B_SLPIN_DELAY 200
-#define AXS15231B_SLPOUT_DELAY 200
+#define AXS15231B_TFTWIDTH 360
+#define AXS15231B_TFTHEIGHT 640
+
+#define AXS15231B_RST_DELAY 200    ///< delay ms wait for reset finish
+#define AXS15231B_SLPIN_DELAY 120  ///< delay ms wait for sleep in finish
+#define AXS15231B_SLPOUT_DELAY 120 ///< delay ms wait for sleep out finish
 
 #define AXS15231B_SWRESET 0x01
+
 #define AXS15231B_SLPIN 0x10
 #define AXS15231B_SLPOUT 0x11
+
 #define AXS15231B_INVOFF 0x20
 #define AXS15231B_INVON 0x21
 #define AXS15231B_DISPOFF 0x28
 #define AXS15231B_DISPON 0x29
+
 #define AXS15231B_CASET 0x2A
 #define AXS15231B_RASET 0x2B
 #define AXS15231B_RAMWR 0x2C
+
+#define AXS15231B_PTLAR 0x30
 #define AXS15231B_COLMOD 0x3A
 #define AXS15231B_MADCTL 0x36
+
 #define AXS15231B_MADCTL_MY 0x80
 #define AXS15231B_MADCTL_MX 0x40
 #define AXS15231B_MADCTL_MV 0x20
 #define AXS15231B_MADCTL_ML 0x10
 #define AXS15231B_MADCTL_RGB 0x00
 
-static const uint8_t axs15231b_320480_type1_init_operations[] = {
+static const uint8_t axs15231b_init_operations[] = {
+    BEGIN_WRITE,
+    WRITE_C8_BYTES, 0xBB, 8,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x5A, 0xA5,
+    END_WRITE,
+
     BEGIN_WRITE,
     WRITE_C8_BYTES, 0xA0, 17,
     0xC0, 0x10, 0x00, 0x02, 0x00,
@@ -64,7 +78,7 @@ static const uint8_t axs15231b_320480_type1_init_operations[] = {
 
     BEGIN_WRITE,
     WRITE_C8_BYTES, 0xA3, 22,
-    0xA0, 0x06, 0xAA, 0x00, 0x08,
+    0xA0, 0x06, 0xAa, 0x00, 0x08,
     0x02, 0x0A, 0x04, 0x04, 0x04,
     0x04, 0x04, 0x04, 0x04, 0x04,
     0x04, 0x04, 0x04, 0x04, 0x00,
@@ -277,19 +291,28 @@ static const uint8_t axs15231b_320480_type1_init_operations[] = {
     0x00, 0x00, 0x00, 0x00,
     END_WRITE};
 
-
-class Arduino_AXS15231B : public Arduino_TFT {
+class Arduino_AXS15231B : public Arduino_TFT
+{
 public:
-  Arduino_AXS15231B(Arduino_DataBus *bus, int8_t rst = GFX_NOT_DEFINED, uint8_t r = 0,
-                    bool ips = false, int16_t w = 0, int16_t h = 0);
+  Arduino_AXS15231B(
+      Arduino_DataBus *bus, int8_t rst = GFX_NOT_DEFINED, uint8_t r = 0,
+      bool ips = false, int16_t w = AXS15231B_TFTWIDTH, int16_t h = AXS15231B_TFTHEIGHT,
+      uint8_t col_offset1 = 0, uint8_t row_offset1 = 0, uint8_t col_offset2 = 0, uint8_t row_offset2 = 0);
 
   bool begin(int32_t speed = GFX_NOT_DEFINED) override;
-  void writeAddrWindow(int16_t x, int16_t y, uint16_t w, uint16_t h) override;
+
   void setRotation(uint8_t r) override;
-  void invertDisplay(bool i) override;
+
+  void writeAddrWindow(int16_t x, int16_t y, uint16_t w, uint16_t h) override;
+
+  void invertDisplay(bool) override;
   void displayOn() override;
   void displayOff() override;
 
 protected:
   void tftInit() override;
+
+private:
 };
+
+#endif

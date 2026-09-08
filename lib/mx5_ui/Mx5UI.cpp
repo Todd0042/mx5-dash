@@ -1656,8 +1656,13 @@ void Mx5UI::updateSpeedScreen() {
         if (data_local_.rpm > 6500) warnTopDots(rpmSeg_);
         lv_label_set_text_fmt(rpmSeg_.val, "%d rpm", data_local_.rpm);
 
-        updateDottedValue(fuelSeg_, data_local_.fuelLevelPct / 100.0f);
-        lv_label_set_text_fmt(fuelSeg_.val, "%d%%", data_local_.fuelLevelPct);
+        if (data_local_.fuelLevelPct == 0) {
+            updateDottedValue(fuelSeg_, 0.0f);
+            lv_label_set_text(fuelSeg_.val, "--%");
+        } else {
+            updateDottedValue(fuelSeg_, data_local_.fuelLevelPct / 100.0f);
+            lv_label_set_text_fmt(fuelSeg_.val, "%d%%", data_local_.fuelLevelPct);
+        }
 
         if (data_local_.ambientC == 0) {
             updateDottedValue(ambientSeg_, 0.0f);
@@ -2205,7 +2210,7 @@ lv_obj_t* Mx5UI::buildDiagSubFuel() {
     diagAfrVal_ = lv_label_create(afrCard);
     lv_obj_set_style_text_font(diagAfrVal_, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(diagAfrVal_, C_SPEED, 0);
-    lv_label_set_text(diagAfrVal_, "14.7 : 1");
+    lv_label_set_text(diagAfrVal_, "-- : 1");
     lv_obj_align(diagAfrVal_, LV_ALIGN_LEFT_MID, 14, 0);
     lockNoScroll(diagAfrVal_);
 
@@ -2278,7 +2283,7 @@ lv_obj_t* Mx5UI::buildDiagSubFuel() {
     lv_obj_t* evapSub = lv_label_create(evapCard);
     lv_obj_set_style_text_font(evapSub, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(evapSub, C_DIM, 0);
-    lv_label_set_text(evapSub, "Purge Valve: 18% Duty");
+    lv_label_set_text(evapSub, "Evaporative Emission System");
     lv_obj_align(evapSub, LV_ALIGN_BOTTOM_LEFT, 14, -10);
     lockNoScroll(evapSub);
 
@@ -2286,15 +2291,22 @@ lv_obj_t* Mx5UI::buildDiagSubFuel() {
 }
 
 void Mx5UI::updateDiagSubFuel() {
-    // STFT (-25%..+25% -> 0..1, center 0.5)
-    float stftFrac = (data_local_.shortTermFuelTrimPct + 25.0f) / 50.0f;
-    updateDottedValue(stftSeg_, stftFrac);
-    lv_label_set_text_fmt(stftSeg_.val, "%+.1f%%", data_local_.shortTermFuelTrimPct);
+    if (data_local_.coolantC == 0 && data_local_.rpm == 0) {
+        updateDottedValue(stftSeg_, 0.5f);
+        lv_label_set_text(stftSeg_.val, "--%");
+        updateDottedValue(ltftSeg_, 0.5f);
+        lv_label_set_text(ltftSeg_.val, "--%");
+    } else {
+        // STFT (-25%..+25% -> 0..1, center 0.5)
+        float stftFrac = (data_local_.shortTermFuelTrimPct + 25.0f) / 50.0f;
+        updateDottedValue(stftSeg_, stftFrac);
+        lv_label_set_text_fmt(stftSeg_.val, "%+.1f%%", data_local_.shortTermFuelTrimPct);
 
-    // LTFT (-25%..+25% -> 0..1, center 0.5)
-    float ltftFrac = (data_local_.longTermFuelTrimPct + 25.0f) / 50.0f;
-    updateDottedValue(ltftSeg_, ltftFrac);
-    lv_label_set_text_fmt(ltftSeg_.val, "%+.1f%%", data_local_.longTermFuelTrimPct);
+        // LTFT (-25%..+25% -> 0..1, center 0.5)
+        float ltftFrac = (data_local_.longTermFuelTrimPct + 25.0f) / 50.0f;
+        updateDottedValue(ltftSeg_, ltftFrac);
+        lv_label_set_text_fmt(ltftSeg_.val, "%+.1f%%", data_local_.longTermFuelTrimPct);
+    }
 
     // AFR
     if (data_local_.airFuelRatio <= 0.01f) {
@@ -2305,7 +2317,7 @@ void Mx5UI::updateDiagSubFuel() {
 
     // HPFP Rail Pressure
     if (data_local_.fuelRailPressurePsi == 0) {
-        lv_label_set_text(diagHpfpVal_, "0 PSI");
+        lv_label_set_text(diagHpfpVal_, "-- PSI");
     } else {
         lv_label_set_text_fmt(diagHpfpVal_, "%d PSI", data_local_.fuelRailPressurePsi);
     }
@@ -2594,7 +2606,7 @@ lv_obj_t* Mx5UI::buildDiagSubChassis() {
     diagTccSlipVal_ = lv_label_create(transCard);
     lv_obj_set_style_text_font(diagTccSlipVal_, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(diagTccSlipVal_, C_OK, 0);
-    lv_label_set_text(diagTccSlipVal_, "TCC Slip: 0 RPM (LOCKED)");
+    lv_label_set_text(diagTccSlipVal_, "TCC Slip: -- RPM");
     lv_obj_align(diagTccSlipVal_, LV_ALIGN_BOTTOM_LEFT, 14, -10);
     lockNoScroll(diagTccSlipVal_);
 
@@ -2604,17 +2616,35 @@ lv_obj_t* Mx5UI::buildDiagSubChassis() {
 void Mx5UI::updateDiagSubChassis() {
     const char* spdUnit = MX5_UNITS_US ? "MPH" : "km/h";
     for (uint8_t w = 0; w < 4; w++) {
-        uint8_t s = speedU((uint8_t)lroundf(data_local_.wheelSpeedKmh[w]));
-        lv_label_set_text_fmt(wheelSpeedLbl_[w], "%d %s", s, spdUnit);
+        if (data_local_.wheelSpeedKmh[w] <= 0.1f && data_local_.speedKmh == 0) {
+            lv_label_set_text_fmt(wheelSpeedLbl_[w], "-- %s", spdUnit);
+        } else {
+            uint8_t s = speedU((uint8_t)lroundf(data_local_.wheelSpeedKmh[w]));
+            lv_label_set_text_fmt(wheelSpeedLbl_[w], "%d %s", s, spdUnit);
+        }
     }
 
-    lv_label_set_text_fmt(diagSasVal_, "%+.1f°", data_local_.steeringAngleDeg);
-    lv_label_set_text_fmt(diagTransTempVal_, "ATF Temp: %d %s",
-                          tempU(data_local_.transFluidTempC),
-                          MX5_UNITS_US ? "°F" : "°C");
-    lv_label_set_text_fmt(diagTccSlipVal_, "TCC Slip: %d RPM %s",
-                          data_local_.tccSlipRpm,
-                          data_local_.tccSlipRpm < 20 ? "(LOCKED)" : "(SLIPPING)");
+    if (diagSasVal_) {
+        lv_label_set_text_fmt(diagSasVal_, "%+.1f°", data_local_.steeringAngleDeg);
+    }
+    if (diagTransTempVal_) {
+        if (data_local_.transFluidTempC == 0) {
+            lv_label_set_text(diagTransTempVal_, "ATF Temp: --");
+        } else {
+            lv_label_set_text_fmt(diagTransTempVal_, "ATF Temp: %d %s",
+                                  tempU(data_local_.transFluidTempC),
+                                  MX5_UNITS_US ? "°F" : "°C");
+        }
+    }
+    if (diagTccSlipVal_) {
+        if (data_local_.rpm == 0) {
+            lv_label_set_text(diagTccSlipVal_, "TCC Slip: -- RPM");
+        } else {
+            lv_label_set_text_fmt(diagTccSlipVal_, "TCC Slip: %d RPM %s",
+                                  data_local_.tccSlipRpm,
+                                  data_local_.tccSlipRpm < 20 ? "(LOCKED)" : "(SLIPPING)");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -12,7 +12,8 @@
 // ---------------------------------------------------------------------------
 // Hardware & Display Settings (ESP32-S3 + Waveshare 3.5" 480x320)
 // ---------------------------------------------------------------------------
-#define MX5_LCD_ROTATION 3                       // 3 = 270 deg CW (USB Right), 1 = 90 deg CW (USB Left)
+#define MX5_LCD_ROTATION 1                       // 1 = 90 deg CW (USB Left), 3 = 270 deg CW (USB Right)
+#define MX5_DISPLAY_SELFTEST 0                   // 1 = blink R/G/B during display.begin() (bring-up diag only)
 #define MX5_UNITS_US     1                       // 1 = US (MPH / °F / PSI), 0 = Metric (km/h / °C / bar)
 #define MX5_HOR_RES      480
 #define MX5_VER_RES      320
@@ -21,7 +22,7 @@
 #define MX5_AUTO_DIM_ENABLED    1
 #define MX5_DIM_CHECK_INTERVAL_MS 3000
 #define MX5_NIGHT_VOLTS_THRESHOLD 12.8f
-#define MX5_PIN_BACKLIGHT       45
+#define MX5_PIN_BACKLIGHT       6
 #define MX5_LEDC_BACKLIGHT_CH   0
 
 // ---------------------------------------------------------------------------

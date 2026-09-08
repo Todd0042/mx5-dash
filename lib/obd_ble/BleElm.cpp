@@ -3,6 +3,26 @@
 #include <cstring>
 #include <strings.h>
 
+// ---------------------------------------------------------------------------
+// vLinker adapter name matcher.
+// Real Vgate adapters advertise under several spellings: "vLinker MC",
+// "V-LINKER", "V_LINKER", "V LINKER", "vLinker MS" etc. Accept any where the
+// letters "v...linker" appear in order with any mix of separator/case.
+// ---------------------------------------------------------------------------
+static bool isVLinkerName(const char* name) {
+    if (!name || !*name) return false;
+    const char* p = name;
+    while (*p) {
+        if (*p == 'v' || *p == 'V') {
+            const char* q = p + 1;
+            while (*q == ' ' || *q == '-' || *q == '_') q++;
+            if (strncasecmp(q, "linker", 6) == 0) return true;
+        }
+        p++;
+    }
+    return false;
+}
+
 RingbufHandle_t BleElm::ringBuf_ = nullptr;
 
 // ---------------------------------------------------------------------------
@@ -43,45 +63,42 @@ public:
         std::string mac = advertisedDevice->getAddress().toString();
         int rssi = advertisedDevice->getRSSI();
 
-        if (!name.empty() || !mac.empty()) {
-            bool isObd = (strcasestr(name.c_str(), "vLinker") != nullptr ||
-                          strcasestr(name.c_str(), "OBD") != nullptr ||
-                          strcasestr(name.c_str(), "ELM") != nullptr ||
-                          strcasestr(name.c_str(), "Link") != nullptr ||
-                          strcasestr(name.c_str(), "Veepeak") != nullptr ||
-                          strcasestr(name.c_str(), "iCar") != nullptr ||
-                          strcasestr(name.c_str(), "Scan") != nullptr ||
-                          advertisedDevice->isAdvertisingService(NimBLEUUID("FFF0")) ||
-                          advertisedDevice->isAdvertisingService(NimBLEUUID("FFE0")));
+        // Only surface vLinker adapters (or the explicitly paired adapter) in
+        // scan results. vLinker units advertise under many spellings, and some
+        // only broadcast the service UUID without a name — accept both.
+        bool isVLinker   = isVLinkerName(name.c_str());
+        bool isObdUuid   = (advertisedDevice->isAdvertisingService(NimBLEUUID("FFF0")) ||
+                            advertisedDevice->isAdvertisingService(NimBLEUUID("FFE0")) ||
+                            advertisedDevice->isAdvertisingService(NimBLEUUID("18F0")));
+        bool isPairedMac = (strlen(owner_->pairedMac_) > 0 &&
+                            strcasecmp(owner_->pairedMac_, mac.c_str()) == 0);
+        if (!isVLinker && !isObdUuid && !isPairedMac) return;
 
-            // Add or update in discovered list
-            bool exists = false;
-            for (uint8_t i = 0; i < owner_->discoveredCount_; i++) {
-                if (strcasecmp(owner_->discoveredDevices_[i].mac, mac.c_str()) == 0) {
-                    owner_->discoveredDevices_[i].rssi = (int8_t)rssi;
-                    if (!name.empty()) strncpy(owner_->discoveredDevices_[i].name, name.c_str(), sizeof(owner_->discoveredDevices_[i].name) - 1);
-                    exists = true;
-                    break;
-                }
+        // Add or update in discovered list
+        bool exists = false;
+        for (uint8_t i = 0; i < owner_->discoveredCount_; i++) {
+            if (strcasecmp(owner_->discoveredDevices_[i].mac, mac.c_str()) == 0) {
+                owner_->discoveredDevices_[i].rssi = (int8_t)rssi;
+                if (!name.empty()) strncpy(owner_->discoveredDevices_[i].name, name.c_str(), sizeof(owner_->discoveredDevices_[i].name) - 1);
+                exists = true;
+                break;
             }
-            if (!exists && owner_->discoveredCount_ < BleElm::MAX_DISCOVERED) {
-                BleDeviceInfo& d = owner_->discoveredDevices_[owner_->discoveredCount_++];
-                strncpy(d.name, name.empty() ? "OBD Scanner" : name.c_str(), sizeof(d.name) - 1);
-                strncpy(d.mac, mac.c_str(), sizeof(d.mac) - 1);
-                d.rssi = (int8_t)rssi;
-                d.isObdCandidate = isObd;
-                d.isPaired = (strlen(owner_->pairedMac_) > 0 && strcasecmp(owner_->pairedMac_, mac.c_str()) == 0);
-            }
+        }
+        if (!exists && owner_->discoveredCount_ < BleElm::MAX_DISCOVERED) {
+            BleDeviceInfo& d = owner_->discoveredDevices_[owner_->discoveredCount_++];
+            strncpy(d.name, name.empty() ? "vLinker" : name.c_str(), sizeof(d.name) - 1);
+            strncpy(d.mac, mac.c_str(), sizeof(d.mac) - 1);
+            d.rssi = (int8_t)rssi;
+            d.isObdCandidate = true;
+            d.isPaired = isPairedMac;
+        }
 
-            // Auto-match if we have a paired MAC or paired name prefix
-            if (!*outDevice_) {
-                if ((strlen(owner_->pairedMac_) > 0 && strcasecmp(owner_->pairedMac_, mac.c_str()) == 0) ||
-                    (strlen(owner_->pairedMac_) == 0 && (strcasestr(name.c_str(), owner_->namePrefix_) != nullptr || isObd))) {
-                    Serial.printf("[bleElm] -> MATCHED target OBD device: '%s' (%s)\n", name.c_str(), mac.c_str());
-                    *outDevice_ = new NimBLEAdvertisedDevice(*advertisedDevice);
-                    NimBLEDevice::getScan()->stop();
-                }
-            }
+        // Auto-connect ONLY to the explicitly paired adapter. Never auto-pair
+        // a new device from a scan; pairing is explicit on the BLE config screen.
+        if (!*outDevice_ && isPairedMac) {
+            Serial.printf("[bleElm] -> MATCHED target OBD device: '%s' (%s)\n", name.c_str(), mac.c_str());
+            *outDevice_ = new NimBLEAdvertisedDevice(*advertisedDevice);
+            NimBLEDevice::getScan()->stop();
         }
     }
 
@@ -108,6 +125,7 @@ bool BleElm::begin(const char* targetNamePrefix) {
     NimBLEDevice::init("MX5-Dash");
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);   // Max TX power for car cabin range
     NimBLEDevice::setSecurityAuth(true, true, true);
+    NimBLEDevice::setMTU(512);
 
     Serial.printf("[bleElm] initialized BLE subsystem (paired MAC: '%s', prefix: '%s')\n",
                   pairedMac_, namePrefix_);
@@ -215,21 +233,6 @@ void BleElm::loop() {
                     initialized_ = true;
                     retryDelayMs_ = 2000;
                     Serial.println("[bleElm] adapter fully ready for live telemetry");
-
-                    // Auto-bond discovered adapter into NVS if none was previously saved
-                    if (strlen(pairedMac_) == 0 && targetDevice_) {
-                        strncpy(pairedMac_, targetDevice_->getAddress().toString().c_str(), sizeof(pairedMac_) - 1);
-                        pairedMac_[sizeof(pairedMac_) - 1] = '\0';
-                        std::string devName = targetDevice_->getName();
-                        if (!devName.empty()) {
-                            strncpy(pairedName_, devName.c_str(), sizeof(pairedName_) - 1);
-                            pairedName_[sizeof(pairedName_) - 1] = '\0';
-                        }
-                        UserPrefs::savePairedMac(pairedMac_);
-                        UserPrefs::savePairedName(pairedName_);
-                        Serial.printf("[bleElm] auto-bonded paired device: '%s' (%s) into NVS flash\n",
-                                      pairedName_, pairedMac_);
-                    }
                     return;
                 }
                 Serial.println("[bleElm] GATT/ELM init failed, retrying...");
@@ -267,6 +270,8 @@ bool BleElm::connectToDevice() {
     }
 
     Serial.println("[bleElm] physical connect OK");
+    // Request fast connection parameters (7.5ms min, 15ms max) for low latency
+    pClient_->setConnectionParams(6, 12, 0, 100);
     delay(50);
     return true;
 }
@@ -361,7 +366,10 @@ bool BleElm::initAdapter() {
         "ATL0\r",         // 2: Linefeeds off
         "ATS0\r",         // 3: Spaces off
         "ATH0\r",         // 4: Headers off
-        "ATSP0\r",        // 5: Automatic protocol selection
+        "ATAT2\r",        // 5: Adaptive timing mode 2 (aggressive query cadence)
+        "ATST32\r",       // 6: Adapter timeout 200ms (prevents long stalls)
+        "ATSP6\r",        // 7: Protocol 6 = ISO 15765-4 CAN 11-bit/500k (Mazda SkyActiv standard)
+        "ATSH 7E0\r",     // 8: Default to PCM CAN Header 7E0
     };
 
     for (unsigned i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
@@ -479,10 +487,28 @@ bool BleElm::readResponse(char* out, size_t maxLen, uint32_t timeoutMs) {
         delay(1);
     }
 
-    if (n > 0) {
-        out[n] = '\0';
-        return false;   // timed out before prompt, but returned partial
+    // Timeout recovery: abort in-flight command in ELM327 and recover '>' prompt
+    sendCommand("\r");
+    uint32_t resyncStart = millis();
+    while (millis() - resyncStart < 300) {
+        if (ringBuf_) {
+            size_t itemSize = 0;
+            char* item = (char*)xRingbufferReceiveUpTo(ringBuf_, &itemSize, pdMS_TO_TICKS(5), 64);
+            if (item) {
+                bool found = false;
+                for (size_t i = 0; i < itemSize; i++) {
+                    if (item[i] == '>') {
+                        found = true;
+                        break;
+                    }
+                }
+                vRingbufferReturnItem(ringBuf_, (void*)item);
+                if (found) break;
+            }
+        }
+        delay(1);
     }
+    flush(); // Purge any residual bytes so the next command starts completely clean
     out[0] = '\0';
     return false;
 }

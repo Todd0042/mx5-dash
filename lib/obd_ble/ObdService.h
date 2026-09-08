@@ -79,6 +79,7 @@ private:
     static bool readUint8(Impl& i, const char* cmd, const char* pidHex, uint8_t& out);
     static bool readUint16(Impl& i, const char* cmd, const char* pidHex, uint16_t& out);
     static void pollTick(Impl& i, uint32_t now);   // rotates through PID cadences
+    static void executeNextBackgroundQuery(Impl& i, uint32_t now, uint8_t screen, uint8_t step);
     static void pollTpms(Impl& i, uint32_t now);   // Mode 22 (see Config.h)
     static void pollCalibration(Impl& i, uint32_t now); // raw DID capture
 

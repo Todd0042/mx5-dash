@@ -102,6 +102,7 @@ class BluetoothSerialManager(
     private var liveRailPressurePsi = 0
     private var liveSparkAdvance = 0.0f
     private var liveKnockRetard = 0.0f
+    private var liveEvapVaporPa = 0
 
     // TPMS
     private var flPsi = 0.0f
@@ -116,7 +117,8 @@ class BluetoothSerialManager(
     // Dynamic Braking Tracking
     private var lastSpeedKmh = 0
     private var lastSpeedTimeMs = System.currentTimeMillis()
-    private var lastSafetySweepMs = 0L
+    private var lastBackgroundQueryMs = 0L
+    private var backgroundStep = 0
     private var tcmPrnd = '-'
     private var tcmDirectGear = '-'
 
@@ -125,16 +127,32 @@ class BluetoothSerialManager(
     private var tripTotalGallons = 0.0f
     private var liveTripAvgMpg = 0.0f
     private var lastTripCalcTimeMs = 0L
+    private var lastLogMs = 0L
 
     private var isReceiverRegistered = false
     private val btStateReceiver = object : android.content.BroadcastReceiver() {
+        @SuppressLint("MissingPermission")
         override fun onReceive(c: Context?, intent: android.content.Intent?) {
             val action = intent?.action ?: return
             if (action == BluetoothDevice.ACTION_ACL_DISCONNECTED ||
-                action == BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED ||
-                action == BluetoothAdapter.ACTION_STATE_CHANGED) {
-                Log.w(TAG, "Bluetooth hardware/link state change ($action). Reconnecting...")
-                reconnectNow()
+                action == BluetoothDevice.ACTION_ACL_DISCONNECT_REQUESTED) {
+                val dev: BluetoothDevice? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                }
+                val activeDev = socket?.remoteDevice
+                if (dev != null && activeDev != null && dev.address == activeDev.address) {
+                    Log.w(TAG, "Active OBD-II adapter ACL disconnected: ${dev.name} (${dev.address}). Reconnecting...")
+                    reconnectNow()
+                }
+            } else if (action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                if (state == BluetoothAdapter.STATE_TURNING_OFF || state == BluetoothAdapter.STATE_OFF) {
+                    Log.w(TAG, "Bluetooth radio disabled by OS. Reconnecting...")
+                    reconnectNow()
+                }
             }
         }
     }
@@ -256,28 +274,34 @@ class BluetoothSerialManager(
     }
 
     /**
-     * Non-blocking OBD command sender with guaranteed 200ms socket timeout protection.
-     * Prevents thread stalls on lost or truncated Bluetooth packets.
+     * Robust OBD command sender with guaranteed '>' prompt synchronization.
+     * Prevents serial stream desynchronization by strictly awaiting the ELM327 prompt.
      */
     private fun sendObdCommand(
         output: OutputStream,
         input: java.io.InputStream,
         cmd: String,
-        timeoutMs: Long = 180L
+        timeoutMs: Long = 350L
     ): String {
-        // Drain any stale residual bytes before writing
+        // Drain any stale bytes that arrived while idle
+        var drained = 0
         while (input.available() > 0) {
             input.read()
+            drained++
+        }
+        if (drained > 0) {
+            Log.v(TAG, "Drained $drained residual bytes before '$cmd'")
         }
 
+        val sendStart = System.currentTimeMillis()
         output.write("$cmd\r".toByteArray(Charsets.US_ASCII))
         output.flush()
 
         val sb = StringBuilder()
-        val start = System.currentTimeMillis()
         val byteBuf = ByteArray(64)
+        var sawPrompt = false
 
-        while (System.currentTimeMillis() - start < timeoutMs) {
+        while (System.currentTimeMillis() - sendStart < timeoutMs) {
             val avail = input.available()
             if (avail > 0) {
                 val toRead = min(avail, byteBuf.size)
@@ -289,18 +313,49 @@ class BluetoothSerialManager(
                     for (i in 0 until readCount) {
                         val ch = byteBuf[i].toInt().toChar()
                         if (ch == '>') {
-                            return sb.toString().trim()
+                            sawPrompt = true
+                            break
                         }
                         if (ch != '\r' && ch != '\n' && ch != '\u0000') {
                             sb.append(ch)
                         }
                     }
+                    if (sawPrompt) break
                 }
             } else {
-                Thread.sleep(3) // Yield CPU to avoid battery drain
+                Thread.sleep(2)
             }
         }
-        return sb.toString().trim()
+
+        val duration = System.currentTimeMillis() - sendStart
+        val result = sb.toString().trim()
+
+        if (!sawPrompt) {
+            Log.w(TAG, "OBD TIMEOUT on '$cmd' (${duration}ms) - partial: '$result'. Resyncing with CR...")
+            try {
+                // Recovery: send CR to cancel pending command in ELM327 and wait for prompt
+                output.write("\r".toByteArray(Charsets.US_ASCII))
+                output.flush()
+                val resyncStart = System.currentTimeMillis()
+                while (System.currentTimeMillis() - resyncStart < 300L) {
+                    if (input.available() > 0) {
+                        val c = input.read()
+                        if (c == '>'.code) {
+                            Log.i(TAG, "ELM327 prompt '>' recovered after timeout on '$cmd'")
+                            break
+                        }
+                    } else {
+                        Thread.sleep(2)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Prompt recovery failed: ${e.message}")
+            }
+            return "" // Return empty so partial response is NEVER mistaken for next command
+        }
+
+        Log.d(TAG, "OBD: '$cmd' (${duration}ms) => '$result'")
+        return result
     }
 
     private fun parseHexBytes(resp: String, prefix: String): List<Int> {
@@ -334,22 +389,75 @@ class BluetoothSerialManager(
         return min(100, max(0, pct.roundToInt()))
     }
 
+    private fun decodeTcmGear(prndBytes: List<Int>) {
+        if (prndBytes.isEmpty()) return
+        val b = prndBytes[0]
+        when {
+            b == 0x60 -> {
+                tcmPrnd = 'R'
+                tcmDirectGear = 'R'
+            }
+            b == 0x70 -> {
+                tcmPrnd = 'P'
+                tcmDirectGear = 'P'
+            }
+            b == 0x50 -> {
+                tcmPrnd = 'N'
+                tcmDirectGear = 'N'
+            }
+            b in 1..6 -> {
+                tcmPrnd = 'D'
+                tcmDirectGear = ('0' + b).toChar()
+            }
+            (b and 0xF0) != 0 && (b and 0x0F) in 1..6 -> {
+                tcmPrnd = 'D'
+                tcmDirectGear = ('0' + (b and 0x0F)).toChar()
+            }
+            else -> {
+                Log.d(TAG, "TCM 221E12 raw byte: 0x${Integer.toHexString(b)}")
+            }
+        }
+    }
+
     private fun runPollingLoop(sock: BluetoothSocket) {
         val input = sock.inputStream
         val output = sock.outputStream
 
         // Initialize ELM327 protocol for Mazda SkyActiv CAN (ISO 15765-4 CAN 11/500k)
-        sendObdCommand(output, input, "ATZ", 600)
-        sendObdCommand(output, input, "ATE0", 150)
-        sendObdCommand(output, input, "ATL0", 150)
-        sendObdCommand(output, input, "ATH0", 150)
-        sendObdCommand(output, input, "ATS0", 150)
-        sendObdCommand(output, input, "ATAT2", 150)  // Fast adaptive timing
-        sendObdCommand(output, input, "ATST32", 150) // 200ms timeout for Mode 22 DIDs
+        sendObdCommand(output, input, "ATZ", 1200)
+        try { Thread.sleep(150) } catch (_: InterruptedException) {}
+        sendObdCommand(output, input, "ATE0", 300)   // Echo off
+        sendObdCommand(output, input, "ATL0", 200)   // Linefeeds off
+        sendObdCommand(output, input, "ATH0", 200)   // Headers off
+        sendObdCommand(output, input, "ATS0", 200)   // Spaces off
+        sendObdCommand(output, input, "ATAT2", 200)  // Fast adaptive timing
+        sendObdCommand(output, input, "ATST32", 200) // 200ms timeout for Mode 22 DIDs
         sendObdCommand(output, input, "ATSP6", 300)  // Direct ISO 15765-4 CAN 11/500k (Fast Mazda CAN)
+        sendObdCommand(output, input, "ATSH 7E0", 200) // Explicitly set PCM Header 7E0
+
+        // Transmission Auto-Detection: Probe TCM (Header 7E1) to auto-detect 6AT (Automatic) vs 6MT (Manual)
+        try {
+            sendObdCommand(output, input, "ATSH 7E1", 200)
+            val tcmResp = sendObdCommand(output, input, "221E12", 300)
+            val hasTcm = parseHexBytes(tcmResp, "621E12").isNotEmpty() ||
+                         (!tcmResp.contains("NO DATA", ignoreCase = true) &&
+                          !tcmResp.contains("ERROR", ignoreCase = true) &&
+                          !tcmResp.contains("UNABLE", ignoreCase = true) &&
+                          tcmResp.trim().length >= 6)
+            Log.i(TAG, "Transmission auto-detection probe: resp='$tcmResp', detectedAuto=$hasTcm")
+            context.getSharedPreferences("sys_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("trans_auto", hasTcm)
+                .apply()
+        } catch (e: Exception) {
+            Log.w(TAG, "Transmission probe exception", e)
+        } finally {
+            sendObdCommand(output, input, "ATSH 7E0", 200)
+        }
 
         var screenTick = 0
         var consecutiveTimeouts = 0
+        var consecutiveNoData = 0
         var lastValidResponseMs = System.currentTimeMillis()
         var isEcuAwake = true
 
@@ -359,77 +467,69 @@ class BluetoothSerialManager(
             // ================================================================
             // 1. ALWAYS POLL HIGH-PRIORITY: Vehicle Speed (Mode 010D)
             // ================================================================
-            val spdResp = sendObdCommand(output, input, "010D", 250)
+            val spdResp = sendObdCommand(output, input, "010D", 350)
             val spdBytes = parseHexBytes(spdResp, "410D")
 
             if (spdBytes.isNotEmpty()) {
                 liveSpeedKmh = spdBytes[0]
                 consecutiveTimeouts = 0
+                consecutiveNoData = 0
                 lastValidResponseMs = nowMs
-                if (!isEcuAwake) {
-                    isEcuAwake = true
-                    notifyConnectionState(true, sock.remoteDevice?.name ?: "OBD-II Scanner")
-                }
+                isEcuAwake = true
             } else if (spdResp.isNotEmpty()) {
-                // Dongle replied (e.g. "NO DATA", "BUS INIT", "STOPPED", "CAN ERROR", etc.)
                 consecutiveTimeouts = 0
-                lastValidResponseMs = nowMs
-
-                // If ELM replied NO DATA or CAN bus search timeout, vehicle ignition is OFF
                 if (spdResp.contains("NO DATA", ignoreCase = true) ||
                     spdResp.contains("UNABLE", ignoreCase = true) ||
                     spdResp.contains("BUS INIT", ignoreCase = true) ||
                     spdResp.contains("ERROR", ignoreCase = true) ||
                     spdResp.contains("STOPPED", ignoreCase = true)) {
-                    if (isEcuAwake) {
+                    consecutiveNoData++
+                    Log.w(TAG, "Speed 010D non-data response: '$spdResp' (count: $consecutiveNoData)")
+                    if (consecutiveNoData >= 15) {
                         isEcuAwake = false
-                        notifyConnectionState(true, "${sock.remoteDevice?.name ?: "OBD-II"} (STANDBY)")
+                        pushTelemetrySnapshot(nowMs)
+                        Thread.sleep(500)
+                        continue
                     }
-                    pushTelemetrySnapshot(nowMs)
-                    Thread.sleep(1500)
-                    continue
                 }
             } else {
                 consecutiveTimeouts++
+                Log.w(TAG, "Speed 010D timeout (consecutiveTimeouts: $consecutiveTimeouts)")
             }
 
-            // Mandatory thread throttle yield (35ms) to conserve phone battery & prevent vLinker buffer overrun
-            Thread.sleep(35)
+            // Short yield to avoid hogging CPU while maintaining responsive ~20Hz telemetry
+            Thread.sleep(20)
 
-            // Watchdog check: If 5 consecutive PID timeouts occurred, check adapter heartbeat with ATRV
-            if (consecutiveTimeouts >= 5) {
+            // Watchdog check: If 20 consecutive PID timeouts occurred (>7s of total silence), verify adapter health
+            if (consecutiveTimeouts >= 20) {
+                Log.w(TAG, "Watchdog triggered after 20 timeouts. Checking adapter ATRV...")
                 val voltResp = sendObdCommand(output, input, "ATRV", 400)
                 if (voltResp.isNotEmpty() && (voltResp.contains("V", ignoreCase = true) || voltResp.any { it.isDigit() })) {
-                    // Dongle is alive! Car ECU is simply asleep / off.
+                    // Dongle is alive! Reset counter
                     consecutiveTimeouts = 0
                     lastValidResponseMs = nowMs
                     val v = voltResp.replace("V", "").replace("v", "").trim().toFloatOrNull()
                     if (v != null && v > 5f) liveBatVolts = v
-
-                    if (isEcuAwake) {
-                        isEcuAwake = false
-                        notifyConnectionState(true, "${sock.remoteDevice?.name ?: "OBD-II"} (STANDBY)")
-                    }
-                    pushTelemetrySnapshot(nowMs)
-                    Thread.sleep(1500)
-                    continue
+                    Log.i(TAG, "Adapter alive via ATRV ($voltResp)")
                 } else {
-                    // Dongle itself is unresponsive (e.g. phone call priority preemption or out of range)
-                    Log.w(TAG, "OBD adapter unresponsive to ATRV pulse (resp: '$voltResp'). Link lost, reconnecting.")
+                    // Dongle itself is unresponsive (e.g. out of range or unpowered)
+                    Log.e(TAG, "OBD adapter unresponsive to ATRV watchdog pulse (resp: '$voltResp'). Link lost, reconnecting.")
                     throw java.io.IOException("OBD adapter link lost")
                 }
             }
 
             // ================================================================
-            // 2. VIEW-DRIVEN SCREEN-SPECIFIC COMMAND QUEUE
+            // 2. VIEW-DRIVEN SCREEN QUEUE & INTERLEAVED BACKGROUND ROTATION
             // ================================================================
             val activeScreen = if (targetTransitionScreen >= 0) targetTransitionScreen else currentActiveScreen
             screenTick = (screenTick + 1) % 16
 
-            // Check 25-Second Safety Warning Sweep (TPMS + Critical Overheat + Ambient Temp)
-            if (nowMs - lastSafetySweepMs > 25000L && activeScreen != 1) { // 1 = SCREEN_TPMS
-                lastSafetySweepMs = nowMs
-                executeSafetySweep(output, input)
+            // Interleaved background check: Polls ONE background metric every 2.5s
+            // Never blocks speed updates (takes at most 45-120ms before speed is polled again)
+            if (nowMs - lastBackgroundQueryMs > 2500L) {
+                lastBackgroundQueryMs = nowMs
+                executeNextBackgroundQuery(output, input, activeScreen, backgroundStep)
+                backgroundStep = (backgroundStep + 1) % 10
             } else {
                 executeScreenQueue(output, input, activeScreen, screenTick)
             }
@@ -452,83 +552,90 @@ class BluetoothSerialManager(
         screen: Int,
         tick: Int
     ) {
+        val isAuto = context.getSharedPreferences("sys_prefs", Context.MODE_PRIVATE).getBoolean("trans_auto", true)
         when (screen) {
-            // Screen 0: Hero Speedometer -> RPM, Fuel %, TCM Direct Gear
+            // Screen 0: Hero Speedometer -> RPM, TCM Direct Gear / Fuel %, Load %
             0 -> {
                 when (tick % 4) {
                     0, 2 -> {
-                        val resp = sendObdCommand(output, input, "010C", 80)
+                        val resp = sendObdCommand(output, input, "010C", 300)
                         val bytes = parseHexBytes(resp, "410C")
                         if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
                     }
                     1 -> {
-                        val resp = sendObdCommand(output, input, "012F", 90)
-                        val bytes = parseHexBytes(resp, "412F")
-                        if (bytes.isNotEmpty()) liveFuelLevelPct = parseCalibratedFuel(bytes[0])
+                        if (isAuto) {
+                            try {
+                                sendObdCommand(output, input, "ATSH 7E1", 150)
+                                val prndResp = sendObdCommand(output, input, "221E12", 250)
+                                val prndBytes = parseHexBytes(prndResp, "621E12")
+                                decodeTcmGear(prndBytes)
+                            } finally {
+                                sendObdCommand(output, input, "ATSH 7E0", 150)
+                            }
+                        } else {
+                            val resp = sendObdCommand(output, input, "012F", 300)
+                            val bytes = parseHexBytes(resp, "412F")
+                            if (bytes.isNotEmpty()) liveFuelLevelPct = parseCalibratedFuel(bytes[0])
+                        }
                     }
                     3 -> {
-                        val isAuto = context.getSharedPreferences("sys_prefs", Context.MODE_PRIVATE).getBoolean("trans_auto", true)
-                        if (isAuto) {
-                            sendObdCommand(output, input, "ATSH 7E1", 90)
-                            val tcmResp = sendObdCommand(output, input, "221E12", 90)
-                            val tcmBytes = parseHexBytes(tcmResp, "621E12")
-                            if (tcmBytes.isNotEmpty() && tcmBytes[0] in 1..6) {
-                                tcmDirectGear = ('0'.code + tcmBytes[0]).toChar()
-                            }
-                            sendObdCommand(output, input, "ATSH 7E0", 90)
+                        if (isAuto && (tick % 16) == 7) {
+                            val resp = sendObdCommand(output, input, "012F", 300)
+                            val bytes = parseHexBytes(resp, "412F")
+                            if (bytes.isNotEmpty()) liveFuelLevelPct = parseCalibratedFuel(bytes[0])
                         } else {
-                            val resp = sendObdCommand(output, input, "010C", 80)
-                            val bytes = parseHexBytes(resp, "410C")
-                            if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                            val resp = sendObdCommand(output, input, "0104", 300)
+                            val bytes = parseHexBytes(resp, "4104")
+                            if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
                         }
                     }
                 }
             }
-            // Screen 1: TPMS -> 4-Corner Pressure & Temp + PRND on BCM 720, then Ambient Temp on PCM 7E0
+            // Screen 1: TPMS -> 4-Corner Pressure & Temp + PRND on TCM 7E1, then Ambient Temp on PCM 7E0
             1 -> {
-                sendObdCommand(output, input, "ATSH 720", 90)
-                val p0 = parseHexBytes(sendObdCommand(output, input, "222A05", 90), "622A05")
-                if (p0.isNotEmpty()) {
-                    flPsi = ((p0[0] * 1373f) / 1000f) * 0.145038f
-                    if (p0.size >= 2) flTemp = (p0[1] - 40).toFloat()
+                try {
+                    sendObdCommand(output, input, "ATSH 720", 150)
+                    val p0 = parseHexBytes(sendObdCommand(output, input, "222A05", 250), "622A05")
+                    if (p0.isNotEmpty()) {
+                        flPsi = ((p0[0] * 1373f) / 1000f) * 0.145038f
+                        if (p0.size >= 2) flTemp = (p0[1] - 40).toFloat()
+                    }
+
+                    val p1 = parseHexBytes(sendObdCommand(output, input, "222A06", 250), "622A06")
+                    if (p1.isNotEmpty()) {
+                        frPsi = ((p1[0] * 1373f) / 1000f) * 0.145038f
+                        if (p1.size >= 2) frTemp = (p1[1] - 40).toFloat()
+                    }
+
+                    val p2 = parseHexBytes(sendObdCommand(output, input, "222A07", 250), "622A07")
+                    if (p2.isNotEmpty()) {
+                        rlPsi = ((p2[0] * 1373f) / 1000f) * 0.145038f
+                        if (p2.size >= 2) rlTemp = (p2[1] - 40).toFloat()
+                    }
+
+                    val p3 = parseHexBytes(sendObdCommand(output, input, "222A08", 250), "622A08")
+                    if (p3.isNotEmpty()) {
+                        rrPsi = ((p3[0] * 1373f) / 1000f) * 0.145038f
+                        if (p3.size >= 2) rrTemp = (p3[1] - 40).toFloat()
+                    }
+                } finally {
+                    sendObdCommand(output, input, "ATSH 7E0", 150)
                 }
 
-                val p1 = parseHexBytes(sendObdCommand(output, input, "222A06", 90), "622A06")
-                if (p1.isNotEmpty()) {
-                    frPsi = ((p1[0] * 1373f) / 1000f) * 0.145038f
-                    if (p1.size >= 2) frTemp = (p1[1] - 40).toFloat()
-                }
-
-                val p2 = parseHexBytes(sendObdCommand(output, input, "222A07", 90), "622A07")
-                if (p2.isNotEmpty()) {
-                    rlPsi = ((p2[0] * 1373f) / 1000f) * 0.145038f
-                    if (p2.size >= 2) rlTemp = (p2[1] - 40).toFloat()
-                }
-
-                val p3 = parseHexBytes(sendObdCommand(output, input, "222A08", 90), "622A08")
-                if (p3.isNotEmpty()) {
-                    rrPsi = ((p3[0] * 1373f) / 1000f) * 0.145038f
-                    if (p3.size >= 2) rrTemp = (p3[1] - 40).toFloat()
-                }
-
-                // PRND Selector Position (DID 222A27 on Header 720)
-                val prndResp = sendObdCommand(output, input, "222A27", 90)
-                val prndBytes = parseHexBytes(prndResp, "622A27")
-                if (prndBytes.isNotEmpty()) {
-                    tcmPrnd = when (prndBytes[0]) {
-                        1 -> 'P'
-                        2 -> 'R'
-                        3 -> 'N'
-                        4 -> 'D'
-                        5 -> 'M'
-                        else -> '-'
+                // PRND & Commanded Gear (DID 221E12 on TCM Header 7E1 - only on Automatic)
+                if (isAuto) {
+                    try {
+                        sendObdCommand(output, input, "ATSH 7E1", 150)
+                        val prndResp = sendObdCommand(output, input, "221E12", 250)
+                        val prndBytes = parseHexBytes(prndResp, "621E12")
+                        decodeTcmGear(prndBytes)
+                    } finally {
+                        sendObdCommand(output, input, "ATSH 7E0", 150)
                     }
                 }
 
-                sendObdCommand(output, input, "ATSH 7E0", 90)
-
                 // Ambient Air Temp (Mode 01 PID 46 on PCM 7E0)
-                val ambResp = sendObdCommand(output, input, "0146", 80)
+                val ambResp = sendObdCommand(output, input, "0146", 200)
                 val ambBytes = parseHexBytes(ambResp, "4146")
                 if (ambBytes.isNotEmpty()) {
                     val temp = ambBytes[0] - 40
@@ -541,12 +648,12 @@ class BluetoothSerialManager(
             2 -> {
                 when (tick % 4) {
                     0 -> {
-                        val resp = sendObdCommand(output, input, "0105", 80)
+                        val resp = sendObdCommand(output, input, "0105", 200)
                         val bytes = parseHexBytes(resp, "4105")
                         if (bytes.isNotEmpty()) liveCoolantC = bytes[0] - 40
                     }
                     1 -> {
-                        val resp = sendObdCommand(output, input, "221310", 200)
+                        val resp = sendObdCommand(output, input, "221310", 250)
                         val bytes = parseHexBytes(resp, "621310")
                         if (bytes.size >= 2) {
                             val tempC = (((bytes[0] * 256) + bytes[1]) / 100.0f) - 40.0f
@@ -556,19 +663,19 @@ class BluetoothSerialManager(
                         }
                     }
                     2 -> {
-                        val resp = sendObdCommand(output, input, "010F", 80)
+                        val resp = sendObdCommand(output, input, "010F", 200)
                         val bytes = parseHexBytes(resp, "410F")
                         if (bytes.isNotEmpty()) liveIntakeC = bytes[0] - 40
                     }
                     3 -> {
                         // Query Mode 01 PID 42 (ECU Control Module Supply Voltage) with ATRV fallback
-                        val resp = sendObdCommand(output, input, "0142", 100)
+                        val resp = sendObdCommand(output, input, "0142", 200)
                         val bytes = parseHexBytes(resp, "4142")
                         if (bytes.size >= 2) {
                             val v = ((bytes[0] * 256) + bytes[1]) / 1000.0f
                             if (v > 5f) liveBatVolts = v
                         } else {
-                            val atrvResp = sendObdCommand(output, input, "ATRV", 80)
+                            val atrvResp = sendObdCommand(output, input, "ATRV", 200)
                             val v = atrvResp.replace("V", "").replace("v", "").trim().toFloatOrNull()
                             if (v != null && v > 5f) liveBatVolts = v
                         }
@@ -579,27 +686,27 @@ class BluetoothSerialManager(
             3 -> {
                 when (tick % 5) {
                     0 -> {
-                        val resp = sendObdCommand(output, input, "0106", 80)
+                        val resp = sendObdCommand(output, input, "0106", 200)
                         val bytes = parseHexBytes(resp, "4106")
                         if (bytes.isNotEmpty()) liveStft = ((bytes[0] - 128) * 100f) / 128f
                     }
                     1 -> {
-                        val resp = sendObdCommand(output, input, "0107", 80)
+                        val resp = sendObdCommand(output, input, "0107", 200)
                         val bytes = parseHexBytes(resp, "4107")
                         if (bytes.isNotEmpty()) liveLtft = ((bytes[0] - 128) * 100f) / 128f
                     }
                     2 -> {
-                        val resp = sendObdCommand(output, input, "0123", 80)
+                        val resp = sendObdCommand(output, input, "0123", 200)
                         val bytes = parseHexBytes(resp, "4123")
                         if (bytes.size >= 2) liveRailPressurePsi = ((((bytes[0] * 256) + bytes[1]) * 10) * 0.145038f).toInt()
                     }
                     3 -> {
-                        val resp = sendObdCommand(output, input, "0124", 80)
+                        val resp = sendObdCommand(output, input, "0124", 200)
                         val bytes = parseHexBytes(resp, "4124")
                         if (bytes.size >= 2) liveAfr = (((bytes[0] * 256) + bytes[1]) / 32768.0f) * 14.7f
                     }
                     4 -> {
-                        val resp = sendObdCommand(output, input, "010E", 80)
+                        val resp = sendObdCommand(output, input, "010E", 200)
                         val bytes = parseHexBytes(resp, "410E")
                         if (bytes.isNotEmpty()) liveSparkAdvance = (bytes[0] / 2.0f) - 64.0f
                     }
@@ -609,17 +716,17 @@ class BluetoothSerialManager(
             4 -> {
                 when (tick % 3) {
                     0 -> {
-                        val resp = sendObdCommand(output, input, "0111", 80)
+                        val resp = sendObdCommand(output, input, "0111", 200)
                         val bytes = parseHexBytes(resp, "4111")
                         if (bytes.isNotEmpty()) liveThrottlePct = parseCalibratedThrottle(bytes[0])
                     }
                     1 -> {
-                        val resp = sendObdCommand(output, input, "010C", 80)
+                        val resp = sendObdCommand(output, input, "010C", 200)
                         val bytes = parseHexBytes(resp, "410C")
                         if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
                     }
                     2 -> {
-                        val resp = sendObdCommand(output, input, "0104", 80)
+                        val resp = sendObdCommand(output, input, "0104", 200)
                         val bytes = parseHexBytes(resp, "4104")
                         if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
                     }
@@ -629,17 +736,17 @@ class BluetoothSerialManager(
             5 -> {
                 when (tick % 3) {
                     0 -> {
-                        val resp = sendObdCommand(output, input, "010C", 80)
+                        val resp = sendObdCommand(output, input, "010C", 200)
                         val bytes = parseHexBytes(resp, "410C")
                         if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
                     }
                     1 -> {
-                        val resp = sendObdCommand(output, input, "0104", 80)
+                        val resp = sendObdCommand(output, input, "0104", 200)
                         val bytes = parseHexBytes(resp, "4104")
                         if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
                     }
                     2 -> {
-                        val resp = sendObdCommand(output, input, "0111", 80)
+                        val resp = sendObdCommand(output, input, "0111", 200)
                         val bytes = parseHexBytes(resp, "4111")
                         if (bytes.isNotEmpty()) liveThrottlePct = parseCalibratedThrottle(bytes[0])
                     }
@@ -649,123 +756,290 @@ class BluetoothSerialManager(
             6 -> {
                 when (tick % 2) {
                     0 -> {
-                        val resp = sendObdCommand(output, input, "012F", 90)
+                        val resp = sendObdCommand(output, input, "012F", 200)
                         val bytes = parseHexBytes(resp, "412F")
                         if (bytes.isNotEmpty()) liveFuelLevelPct = parseCalibratedFuel(bytes[0])
                     }
                     1 -> {
-                        val resp = sendObdCommand(output, input, "0104", 80)
+                        val resp = sendObdCommand(output, input, "0104", 200)
                         val bytes = parseHexBytes(resp, "4104")
                         if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
                     }
                 }
             }
-            // Diagnostic Sub-Screens (8-12): Trims (STFT & LTFT), Fuel Rail, AFR, Timing
-            else -> {
-                when (tick % 5) {
+            // Screen 8: Fuel Trims & HPFP Direct Injection
+            8 -> {
+                when (tick % 6) {
                     0 -> {
-                        val resp = sendObdCommand(output, input, "0106", 80)
+                        val resp = sendObdCommand(output, input, "0106", 200)
                         val bytes = parseHexBytes(resp, "4106")
-                        if (bytes.isNotEmpty()) liveStft = ((bytes[0] - 128) * 100f) / 128f
+                        if (bytes.isNotEmpty()) {
+                            liveStft = ((bytes[0] - 128) * 100f) / 128f
+                        }
+                        Log.i(TAG, "Screen8 STFT (0106): '$resp' -> ${liveStft}%")
                     }
                     1 -> {
-                        val resp = sendObdCommand(output, input, "0107", 80)
+                        val resp = sendObdCommand(output, input, "0107", 200)
                         val bytes = parseHexBytes(resp, "4107")
-                        if (bytes.isNotEmpty()) liveLtft = ((bytes[0] - 128) * 100f) / 128f
+                        if (bytes.isNotEmpty()) {
+                            liveLtft = ((bytes[0] - 128) * 100f) / 128f
+                        }
+                        Log.i(TAG, "Screen8 LTFT (0107): '$resp' -> ${liveLtft}%")
                     }
                     2 -> {
-                        val resp = sendObdCommand(output, input, "0123", 80)
+                        val resp = sendObdCommand(output, input, "0123", 200)
                         val bytes = parseHexBytes(resp, "4123")
-                        if (bytes.size >= 2) liveRailPressurePsi = ((((bytes[0] * 256) + bytes[1]) * 10) * 0.145038f).toInt()
+                        if (bytes.size >= 2) {
+                            liveRailPressurePsi = ((((bytes[0] * 256) + bytes[1]) * 10) * 0.145038f).toInt()
+                        } else {
+                            val resp2 = sendObdCommand(output, input, "0122", 200)
+                            val bytes2 = parseHexBytes(resp2, "4122")
+                            if (bytes2.size >= 2) {
+                                liveRailPressurePsi = ((((bytes2[0] * 256) + bytes2[1]) * 0.079f) * 0.145038f).toInt()
+                            }
+                        }
+                        Log.i(TAG, "Screen8 HPFP Rail (0123): '$resp' -> ${liveRailPressurePsi} PSI")
                     }
                     3 -> {
-                        val resp = sendObdCommand(output, input, "0124", 80)
+                        val resp = sendObdCommand(output, input, "0124", 200)
                         val bytes = parseHexBytes(resp, "4124")
-                        if (bytes.size >= 2) liveAfr = (((bytes[0] * 256) + bytes[1]) / 32768.0f) * 14.7f
+                        if (bytes.size >= 2) {
+                            liveAfr = (((bytes[0] * 256) + bytes[1]) / 32768.0f) * 14.7f
+                        } else {
+                            val resp2 = sendObdCommand(output, input, "0134", 200)
+                            val bytes2 = parseHexBytes(resp2, "4134")
+                            if (bytes2.size >= 2) {
+                                liveAfr = (((bytes2[0] * 256) + bytes2[1]) / 32768.0f) * 14.7f
+                            }
+                        }
+                        Log.i(TAG, "Screen8 AFR (0124): '$resp' -> ${liveAfr} : 1")
                     }
                     4 -> {
-                        val resp = sendObdCommand(output, input, "010E", 80)
+                        val resp = sendObdCommand(output, input, "010E", 200)
+                        val bytes = parseHexBytes(resp, "410E")
+                        if (bytes.isNotEmpty()) {
+                            liveSparkAdvance = (bytes[0] / 2.0f) - 64.0f
+                        }
+                        Log.i(TAG, "Screen8 Timing (010E): '$resp' -> ${liveSparkAdvance} deg")
+                    }
+                    5 -> {
+                        val resp = sendObdCommand(output, input, "0132", 200)
+                        val bytes = parseHexBytes(resp, "4132")
+                        if (bytes.size >= 2) {
+                            liveEvapVaporPa = (((bytes[0] * 256) + bytes[1]) / 4) - 8192
+                        }
+                        Log.i(TAG, "Screen8 EVAP (0132): '$resp' -> ${liveEvapVaporPa} Pa")
+                    }
+                }
+            }
+            // Screen 9: Cylinders & Misfire (Mode $06 / Timing)
+            9 -> {
+                when (tick % 3) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "010E", 200)
                         val bytes = parseHexBytes(resp, "410E")
                         if (bytes.isNotEmpty()) liveSparkAdvance = (bytes[0] / 2.0f) - 64.0f
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "010C", 200)
+                        val bytes = parseHexBytes(resp, "410C")
+                        if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                    }
+                    2 -> {
+                        val resp = sendObdCommand(output, input, "0104", 200)
+                        val bytes = parseHexBytes(resp, "4104")
+                        if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
+                    }
+                }
+            }
+            // Screen 10: Chassis Dynamics & G-Force
+            10 -> {
+                when (tick % 3) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "0111", 200)
+                        val bytes = parseHexBytes(resp, "4111")
+                        if (bytes.isNotEmpty()) liveThrottlePct = parseCalibratedThrottle(bytes[0])
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "010C", 200)
+                        val bytes = parseHexBytes(resp, "410C")
+                        if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                    }
+                    2 -> {
+                        val resp = sendObdCommand(output, input, "0104", 200)
+                        val bytes = parseHexBytes(resp, "4104")
+                        if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
+                    }
+                }
+            }
+            // Screen 11: I/M Smog Readiness Monitors
+            11 -> {
+                val resp = sendObdCommand(output, input, "0101", 250)
+                Log.i(TAG, "Screen11 Smog (0101): '$resp'")
+            }
+            // Screen 12: DTC Logs & Black Box
+            12 -> {
+                val resp = sendObdCommand(output, input, "03", 250)
+                Log.i(TAG, "Screen12 Stored DTCs (03): '$resp'")
+            }
+            // Default / Other Screens
+            else -> {
+                when (tick % 3) {
+                    0 -> {
+                        val resp = sendObdCommand(output, input, "010C", 200)
+                        val bytes = parseHexBytes(resp, "410C")
+                        if (bytes.size >= 2) liveRpm = ((bytes[0] * 256) + bytes[1]) / 4
+                    }
+                    1 -> {
+                        val resp = sendObdCommand(output, input, "0104", 200)
+                        val bytes = parseHexBytes(resp, "4104")
+                        if (bytes.isNotEmpty()) liveEngineLoadPct = (bytes[0] * 100) / 255
+                    }
+                    2 -> {
+                        val resp = sendObdCommand(output, input, "0111", 200)
+                        val bytes = parseHexBytes(resp, "4111")
+                        if (bytes.isNotEmpty()) liveThrottlePct = parseCalibratedThrottle(bytes[0])
                     }
                 }
             }
         }
     }
 
-    private fun executeSafetySweep(output: OutputStream, input: java.io.InputStream) {
-        // Query TPMS and Ambient Air Temp on BCM (Header 720)
-        sendObdCommand(output, input, "ATSH 720", 90)
-        val p0 = parseHexBytes(sendObdCommand(output, input, "222A05", 90), "622A05")
-        if (p0.isNotEmpty()) {
-            flPsi = ((p0[0] * 1373f) / 1000f) * 0.145038f
-            if (p0.size >= 2) flTemp = (p0[1] - 40).toFloat()
-        }
-
-        val p1 = parseHexBytes(sendObdCommand(output, input, "222A06", 90), "622A06")
-        if (p1.isNotEmpty()) {
-            frPsi = ((p1[0] * 1373f) / 1000f) * 0.145038f
-            if (p1.size >= 2) frTemp = (p1[1] - 40).toFloat()
-        }
-
-        val p2 = parseHexBytes(sendObdCommand(output, input, "222A07", 90), "622A07")
-        if (p2.isNotEmpty()) {
-            rlPsi = ((p2[0] * 1373f) / 1000f) * 0.145038f
-            if (p2.size >= 2) rlTemp = (p2[1] - 40).toFloat()
-        }
-
-        val p3 = parseHexBytes(sendObdCommand(output, input, "222A08", 90), "622A08")
-        if (p3.isNotEmpty()) {
-            rrPsi = ((p3[0] * 1373f) / 1000f) * 0.145038f
-            if (p3.size >= 2) rrTemp = (p3[1] - 40).toFloat()
-        }
-
-        // PRND Selector Position (DID 222A27 on Header 720)
-        val prndResp = sendObdCommand(output, input, "222A27", 90)
-        val prndBytes = parseHexBytes(prndResp, "622A27")
-        if (prndBytes.isNotEmpty()) {
-            tcmPrnd = when (prndBytes[0]) {
-                1 -> 'P'
-                2 -> 'R'
-                3 -> 'N'
-                4 -> 'D'
-                5 -> 'M'
-                else -> '-'
+    /**
+     * Interleaved background query dispatcher.
+     * Executes ONE background safety query every ~2.5s instead of running a 2+ second blocking sweep.
+     * Guarantees that vehicle speed polling is never delayed by more than 45-120ms.
+     */
+    private fun executeNextBackgroundQuery(
+        output: OutputStream,
+        input: java.io.InputStream,
+        activeScreen: Int,
+        step: Int
+    ) {
+        when (step) {
+            0 -> { // Coolant Temp (0105 on PCM 7E0) - skip if user is on Temps screen (2)
+                if (activeScreen != 2) {
+                    val resp = sendObdCommand(output, input, "0105", 350)
+                    val bytes = parseHexBytes(resp, "4105")
+                    if (bytes.isNotEmpty()) liveCoolantC = bytes[0] - 40
+                }
             }
-        }
-
-        // Restore PCM
-        sendObdCommand(output, input, "ATSH 7E0", 90)
-
-        // Check Coolant & Oil Temp alarms & Ambient Air Temp on PCM
-        val cool = parseHexBytes(sendObdCommand(output, input, "0105", 80), "4105")
-        if (cool.isNotEmpty()) liveCoolantC = cool[0] - 40
-
-        val oil = parseHexBytes(sendObdCommand(output, input, "221310", 200), "621310")
-        if (oil.size >= 2) {
-            val tempC = (((oil[0] * 256) + oil[1]) / 100.0f) - 40.0f
-            if (tempC in 0.0f..160.0f) liveOilTempC = tempC.roundToInt()
-        } else if (oil.isNotEmpty() && oil[0] > 40) {
-            liveOilTempC = oil[0] - 40
-        }
-
-        val amb = parseHexBytes(sendObdCommand(output, input, "0146", 80), "4146")
-        if (amb.isNotEmpty()) {
-            val temp = amb[0] - 40
-            if (temp in -40..60) {
-                liveAmbientC = temp
+            1 -> { // Oil Temp (221310 on PCM 7E0) - skip if user is on Temps screen (2)
+                if (activeScreen != 2) {
+                    val resp = sendObdCommand(output, input, "221310", 350)
+                    val bytes = parseHexBytes(resp, "621310")
+                    if (bytes.size >= 2) {
+                        val tempC = (((bytes[0] * 256) + bytes[1]) / 100.0f) - 40.0f
+                        if (tempC in 0.0f..160.0f) liveOilTempC = tempC.roundToInt()
+                    } else if (bytes.isNotEmpty() && bytes[0] > 40) {
+                        liveOilTempC = bytes[0] - 40
+                    }
+                }
             }
-        }
-
-        // Battery Voltage on PCM (PID 0142 with ATRV fallback)
-        val batBytes = parseHexBytes(sendObdCommand(output, input, "0142", 100), "4142")
-        if (batBytes.size >= 2) {
-            val v = ((batBytes[0] * 256) + batBytes[1]) / 1000.0f
-            if (v > 5f) liveBatVolts = v
-        } else {
-            val atrvResp = sendObdCommand(output, input, "ATRV", 80)
-            val v = atrvResp.replace("V", "").replace("v", "").trim().toFloatOrNull()
-            if (v != null && v > 5f) liveBatVolts = v
+            2 -> { // Ambient Temp (0146 on PCM 7E0) - skip if on TPMS (1) or Temps (2)
+                if (activeScreen != 1 && activeScreen != 2) {
+                    val resp = sendObdCommand(output, input, "0146", 350)
+                    val bytes = parseHexBytes(resp, "4146")
+                    if (bytes.isNotEmpty()) {
+                        val temp = bytes[0] - 40
+                        if (temp in -40..60) liveAmbientC = temp
+                    }
+                }
+            }
+            3 -> { // Battery Voltage (0142 on PCM 7E0) - skip if on Temps (2)
+                if (activeScreen != 2) {
+                    val resp = sendObdCommand(output, input, "0142", 350)
+                    val bytes = parseHexBytes(resp, "4142")
+                    if (bytes.size >= 2) {
+                        val v = ((bytes[0] * 256) + bytes[1]) / 1000.0f
+                        if (v > 5f) liveBatVolts = v
+                    } else {
+                        val atrv = sendObdCommand(output, input, "ATRV", 250)
+                        val v = atrv.replace("V", "").replace("v", "").trim().toFloatOrNull()
+                        if (v != null && v > 5f) liveBatVolts = v
+                    }
+                }
+            }
+            4 -> { // Intake Air Temp (010F on PCM 7E0) - skip if on Temps (2)
+                if (activeScreen != 2) {
+                    val resp = sendObdCommand(output, input, "010F", 350)
+                    val bytes = parseHexBytes(resp, "410F")
+                    if (bytes.isNotEmpty()) liveIntakeC = bytes[0] - 40
+                }
+            }
+            5 -> { // TPMS Front-Left (222A05 on BCM 720) - skip if on TPMS screen (1)
+                if (activeScreen != 1) {
+                    try {
+                        sendObdCommand(output, input, "ATSH 720", 200)
+                        val resp = sendObdCommand(output, input, "222A05", 350)
+                        val bytes = parseHexBytes(resp, "622A05")
+                        if (bytes.isNotEmpty()) {
+                            flPsi = ((bytes[0] * 1373f) / 1000f) * 0.145038f
+                            if (bytes.size >= 2) flTemp = (bytes[1] - 40).toFloat()
+                        }
+                    } finally {
+                        sendObdCommand(output, input, "ATSH 7E0", 200)
+                    }
+                }
+            }
+            6 -> { // TPMS Front-Right (222A06 on BCM 720) - skip if on TPMS screen (1)
+                if (activeScreen != 1) {
+                    try {
+                        sendObdCommand(output, input, "ATSH 720", 200)
+                        val resp = sendObdCommand(output, input, "222A06", 350)
+                        val bytes = parseHexBytes(resp, "622A06")
+                        if (bytes.isNotEmpty()) {
+                            frPsi = ((bytes[0] * 1373f) / 1000f) * 0.145038f
+                            if (bytes.size >= 2) frTemp = (bytes[1] - 40).toFloat()
+                        }
+                    } finally {
+                        sendObdCommand(output, input, "ATSH 7E0", 200)
+                    }
+                }
+            }
+            7 -> { // TPMS Rear-Left (222A07 on BCM 720) - skip if on TPMS screen (1)
+                if (activeScreen != 1) {
+                    try {
+                        sendObdCommand(output, input, "ATSH 720", 200)
+                        val resp = sendObdCommand(output, input, "222A07", 350)
+                        val bytes = parseHexBytes(resp, "622A07")
+                        if (bytes.isNotEmpty()) {
+                            rlPsi = ((bytes[0] * 1373f) / 1000f) * 0.145038f
+                            if (bytes.size >= 2) rlTemp = (bytes[1] - 40).toFloat()
+                        }
+                    } finally {
+                        sendObdCommand(output, input, "ATSH 7E0", 200)
+                    }
+                }
+            }
+            8 -> { // TPMS Rear-Right (222A08 on BCM 720) - skip if on TPMS screen (1)
+                if (activeScreen != 1) {
+                    try {
+                        sendObdCommand(output, input, "ATSH 720", 200)
+                        val resp = sendObdCommand(output, input, "222A08", 350)
+                        val bytes = parseHexBytes(resp, "622A08")
+                        if (bytes.isNotEmpty()) {
+                            rrPsi = ((bytes[0] * 1373f) / 1000f) * 0.145038f
+                            if (bytes.size >= 2) rrTemp = (bytes[1] - 40).toFloat()
+                        }
+                    } finally {
+                        sendObdCommand(output, input, "ATSH 7E0", 200)
+                    }
+                }
+            }
+            9 -> { // TCM Gear & PRND (221E12 on TCM 7E1 - only on Automatic)
+                val isAuto = context.getSharedPreferences("sys_prefs", Context.MODE_PRIVATE).getBoolean("trans_auto", true)
+                if (isAuto && activeScreen != 0 && activeScreen != 1) {
+                    try {
+                        sendObdCommand(output, input, "ATSH 7E1", 150)
+                        val prndResp = sendObdCommand(output, input, "221E12", 250)
+                        val prndBytes = parseHexBytes(prndResp, "621E12")
+                        decodeTcmGear(prndBytes)
+                    } finally {
+                        sendObdCommand(output, input, "ATSH 7E0", 150)
+                    }
+                }
+            }
         }
     }
 
@@ -775,11 +1049,11 @@ class BluetoothSerialManager(
         liveGear = if (isAuto) {
             when {
                 liveRpm == 0 && liveSpeedKmh == 0 -> '-'
-                tcmPrnd == 'R' -> 'R'
-                tcmPrnd == 'P' -> 'P'
-                tcmPrnd == 'N' -> 'N'
-                liveSpeedKmh < 2 -> if (liveRpm > 400) 'P' else '-'
+                tcmPrnd == 'R' || tcmDirectGear == 'R' -> 'R'
+                tcmPrnd == 'P' || tcmDirectGear == 'P' -> 'P'
+                tcmPrnd == 'N' || tcmDirectGear == 'N' -> 'N'
                 tcmDirectGear in '1'..'6' -> tcmDirectGear
+                liveSpeedKmh < 2 -> if (liveRpm > 400) 'P' else '-'
                 else -> {
                     // SkyActiv-Drive RC6A-EL 6AT Physical Gear Ratios (2.866 Final Drive)
                     val r = liveRpm.toFloat() / max(1f, liveSpeedKmh.toFloat())
@@ -796,6 +1070,7 @@ class BluetoothSerialManager(
         } else {
             when {
                 liveRpm == 0 && liveSpeedKmh == 0 -> '-'
+                tcmPrnd == 'R' || tcmDirectGear == 'R' -> 'R'
                 liveSpeedKmh < 3 -> if (liveRpm > 400) 'N' else '-'
                 else -> {
                     // SkyActiv-MT 6MT Physical Gear Ratios (2.866 Final Drive)
@@ -905,6 +1180,11 @@ class BluetoothSerialManager(
             flTemp, frTemp, rlTemp, rrTemp,
             0, false, true
         )
+
+        if (nowMs - lastLogMs > 2000L) {
+            lastLogMs = nowMs
+            Log.i(TAG, "Stream[screen=$currentActiveScreen]: RPM=$liveRpm, Speed=$liveSpeedKmh km/h, Bat=${liveBatVolts}V, ECT=${liveCoolantC}C, Oil=${liveOilTempC}C, Gear=$liveGear, Fuel=${liveFuelLevelPct}%")
+        }
     }
 
     private fun pushDisconnectedSnapshot() {

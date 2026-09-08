@@ -430,11 +430,12 @@ class Mx5RenderView @JvmOverloads constructor(
         return when (screenIndex) {
             0 -> "HERO SPEEDOMETER"
             1 -> "TPMS & TIRE TEMPS"
-            2 -> "ENGINE TACHOMETER"
-            3 -> "TEMPERATURES & FLUIDS"
+            2 -> "TEMPERATURES & FLUIDS"
+            3 -> "DIAGNOSTIC HUB"
             4 -> "TRACK & DYNAMICS"
-            5 -> "FUEL & TRIP ECONOMY"
-            6 -> "DIAGNOSTIC HUB"
+            5 -> "ENGINE TACHOMETER"
+            6 -> "FUEL & TRIP ECONOMY"
+            7 -> "QUICK LAUNCHER MENU"
             8 -> "FUEL TRIMS & HPFP"
             9 -> "CYLINDERS & MISFIRE"
             10 -> "CHASSIS DYNAMICS & G-FORCE"
@@ -519,14 +520,20 @@ class Mx5RenderView @JvmOverloads constructor(
                         }
                     } else if (Math.abs(dy) > 55f && Math.abs(dy) > Math.abs(dx) * 1.25f) {
                         // Vertical swipe
-                        isSwipeHandled = true
-                        NativeBridge.nativeTouch(1, logicalX.toInt(), logicalY.toInt())
-                        val currentScreen = NativeBridge.nativeGetCurrentScreen()
-                        if (currentScreen in 8..12) {
-                            // Exit sub-screen back to Diagnostic Hub (SCREEN_DIAG = 3)
-                            startDirectionalTransition(3, if (dy < 0) Direction.LEFT else Direction.RIGHT)
-                        } else {
-                            NativeBridge.nativeToggleMenu()
+                        // Restrict Swipe UP (dy < 0) to top 2/3 of screen so Android home/nav gestures are preserved
+                        val isSwipeUp = dy < 0
+                        val allowed = !isSwipeUp || (downLogicalY <= (LOGICAL_H * 2f / 3f))
+
+                        if (allowed) {
+                            isSwipeHandled = true
+                            NativeBridge.nativeTouch(1, logicalX.toInt(), logicalY.toInt())
+                            val currentScreen = NativeBridge.nativeGetCurrentScreen()
+                            if (currentScreen in 8..12) {
+                                // Exit sub-screen back to Diagnostic Hub (SCREEN_DIAG = 3)
+                                startDirectionalTransition(3, if (dy < 0) Direction.LEFT else Direction.RIGHT)
+                            } else {
+                                NativeBridge.nativeToggleMenu()
+                            }
                         }
                     } else {
                         NativeBridge.nativeTouch(0, logicalX.toInt(), logicalY.toInt())

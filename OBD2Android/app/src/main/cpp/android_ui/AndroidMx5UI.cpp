@@ -116,50 +116,8 @@ static void triggerSwipe(AndroidMx5UI* ui, int dir) {
     }
 }
 
-void AndroidMx5UI::onScreenEvent(lv_event_t* e) {
-    auto* ui = static_cast<AndroidMx5UI*>(lv_event_get_user_data(e));
-    if (!ui) return;
-
-    static int16_t startX = 0;
-    static int16_t startY = 0;
-    static bool isDragging = false;
-    lv_event_code_t code = lv_event_get_code(e);
-
-    if (code == LV_EVENT_PRESSED) {
-        lv_indev_t* indev = lv_indev_active();
-        if (indev) {
-            lv_point_t p;
-            lv_indev_get_point(indev, &p);
-            startX = p.x;
-            startY = p.y;
-            isDragging = true;
-        }
-    } else if (code == LV_EVENT_RELEASED && isDragging) {
-        isDragging = false;
-        lv_indev_t* indev = lv_indev_active();
-        if (indev) {
-            lv_point_t p;
-            lv_indev_get_point(indev, &p);
-            int16_t dx = p.x - startX;
-            int16_t dy = p.y - startY;
-
-            if (abs(dy) > 55 && abs(dy) > abs(dx) * 1.3f) {
-                triggerSwipe(ui, 0); // Vertical -> Menu Hub
-            } else if (abs(dx) > 55 && abs(dx) > abs(dy) * 1.3f) {
-                triggerSwipe(ui, (dx < 0) ? 1 : -1); // Horizontal -> Next / Prev
-            }
-        }
-    } else if (code == LV_EVENT_GESTURE) {
-        lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
-        if (dir == LV_DIR_LEFT) {
-            triggerSwipe(ui, 1);
-        } else if (dir == LV_DIR_RIGHT) {
-            triggerSwipe(ui, -1);
-        } else if (dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM) {
-            triggerSwipe(ui, 0);
-        }
-        isDragging = false;
-    }
+void AndroidMx5UI::onScreenEvent(lv_event_t*) {
+    // On Android, high-level swipe gestures and animated transitions are handled by Mx5RenderView.kt
 }
 
 void AndroidMx5UI::setScreen(uint8_t index) {
@@ -269,6 +227,7 @@ lv_obj_t* AndroidMx5UI::addSubScreenHeader(lv_obj_t* parent, const char* title, 
     lv_obj_set_style_text_color(backLbl, C_TEXT, 0);
     lv_label_set_text(backLbl, "< BACK");
     lv_obj_center(backLbl);
+    lv_obj_remove_flag(backLbl, LV_OBJ_FLAG_CLICKABLE);
     lockNoScroll(backLbl);
 
     lv_obj_t* titleLbl = lv_label_create(parent);
@@ -530,7 +489,7 @@ lv_obj_t* AndroidMx5UI::buildSpeedScreen() {
         lv_obj_t* val = lv_label_create(tPod);
         lv_obj_set_style_text_font(val, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(val, C_SPEED, 0);
-        lv_label_set_text(val, "32.0 PSI");
+        lv_label_set_text(val, "-- PSI");
         lv_obj_align(val, LV_ALIGN_BOTTOM_LEFT, 10, -8);
         lockNoScroll(val);
         speedWarnTpmsVal_[i] = val;
@@ -558,14 +517,14 @@ lv_obj_t* AndroidMx5UI::buildSpeedScreen() {
     speedWarnCoolantVal_ = lv_label_create(speedWarnTempsCard_);
     lv_obj_set_style_text_font(speedWarnCoolantVal_, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(speedWarnCoolantVal_, C_DANGER, 0);
-    lv_label_set_text(speedWarnCoolantVal_, "ENGINE COOLANT: 232 °F ⚠️");
+    lv_label_set_text(speedWarnCoolantVal_, "ENGINE COOLANT: --");
     lv_obj_align(speedWarnCoolantVal_, LV_ALIGN_TOP_LEFT, 16, 20);
     lockNoScroll(speedWarnCoolantVal_);
 
     speedWarnOilVal_ = lv_label_create(speedWarnTempsCard_);
     lv_obj_set_style_text_font(speedWarnOilVal_, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(speedWarnOilVal_, C_DANGER, 0);
-    lv_label_set_text(speedWarnOilVal_, "ENGINE OIL TEMP: 260 °F ⚠️");
+    lv_label_set_text(speedWarnOilVal_, "ENGINE OIL TEMP: --");
     lv_obj_align(speedWarnOilVal_, LV_ALIGN_TOP_LEFT, 16, 65);
     lockNoScroll(speedWarnOilVal_);
 
@@ -1145,6 +1104,7 @@ lv_obj_t* AndroidMx5UI::buildDiagnosticsScreen() {
     lv_obj_set_style_text_color(scanLbl, C_TEXT, 0);
     lv_label_set_text(scanLbl, "READ DTCs");
     lv_obj_center(scanLbl);
+    lv_obj_remove_flag(scanLbl, LV_OBJ_FLAG_CLICKABLE);
     lockNoScroll(scanLbl);
 
     lv_obj_t* clearBtn = lv_obj_create(card);
@@ -1165,6 +1125,7 @@ lv_obj_t* AndroidMx5UI::buildDiagnosticsScreen() {
     lv_obj_set_style_text_color(clearLbl, C_DIM, 0);
     lv_label_set_text(clearLbl, "CLEAR CODES");
     lv_obj_center(clearLbl);
+    lv_obj_remove_flag(clearLbl, LV_OBJ_FLAG_CLICKABLE);
     lockNoScroll(clearLbl);
 
     lv_obj_t* guideBtn = lv_obj_create(card);
@@ -1185,6 +1146,7 @@ lv_obj_t* AndroidMx5UI::buildDiagnosticsScreen() {
     lv_obj_set_style_text_color(guideLbl, C_CHROME, 0);
     lv_label_set_text(guideLbl, "REPAIR GUIDE");
     lv_obj_center(guideLbl);
+    lv_obj_remove_flag(guideLbl, LV_OBJ_FLAG_CLICKABLE);
     lockNoScroll(guideLbl);
 
     // 5 Advanced Diagnostic Sub-Dashboard Launchers
@@ -1221,6 +1183,7 @@ lv_obj_t* AndroidMx5UI::buildDiagnosticsScreen() {
         lv_obj_set_style_text_color(titleLbl, C_TEXT, 0);
         lv_label_set_text(titleLbl, subDefs[i].title);
         lv_obj_align(titleLbl, LV_ALIGN_TOP_MID, 0, 8);
+        lv_obj_remove_flag(titleLbl, LV_OBJ_FLAG_CLICKABLE);
         lockNoScroll(titleLbl);
 
         lv_obj_t* subLbl = lv_label_create(subBtn);
@@ -1228,6 +1191,7 @@ lv_obj_t* AndroidMx5UI::buildDiagnosticsScreen() {
         lv_obj_set_style_text_color(subLbl, C_DIM, 0);
         lv_label_set_text(subLbl, subDefs[i].subtitle);
         lv_obj_align(subLbl, LV_ALIGN_BOTTOM_MID, 0, -8);
+        lv_obj_remove_flag(subLbl, LV_OBJ_FLAG_CLICKABLE);
         lockNoScroll(subLbl);
     }
 
@@ -1399,6 +1363,7 @@ lv_obj_t* AndroidMx5UI::buildSettingsScreen() {
     lv_obj_set_style_text_color(backLbl, C_TEXT, 0);
     lv_label_set_text(backLbl, "< BACK");
     lv_obj_center(backLbl);
+    lv_obj_remove_flag(backLbl, LV_OBJ_FLAG_CLICKABLE);
     lockNoScroll(backLbl);
 
     lv_obj_t* titleLbl = lv_label_create(scr);
@@ -1459,6 +1424,7 @@ lv_obj_t* AndroidMx5UI::buildSettingsScreen() {
         lv_obj_set_style_text_color(l, C_TEXT, 0);
         lv_label_set_text(l, txt);
         lv_obj_center(l);
+        lv_obj_remove_flag(l, LV_OBJ_FLAG_CLICKABLE);
         lockNoScroll(l);
         return b;
     };
@@ -1614,53 +1580,104 @@ lv_obj_t* AndroidMx5UI::buildDiagSubFuel() {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lockNoScroll(scr);
 
-    speedChipLabel_[SCREEN_DIAG_SUB_FUEL] = addSubScreenHeader(scr, "FUEL TRIMS & HPFP", SCREEN_DIAG_SUB_FUEL);
+    speedChipLabel_[SCREEN_DIAG_SUB_FUEL] = addSubScreenHeader(scr, "FUEL TRIMS & HPFP DIRECT INJECTION", SCREEN_DIAG_SUB_FUEL);
 
-    lv_obj_t* card = lv_obj_create(scr);
-    lv_obj_remove_style_all(card);
-    lv_obj_set_size(card, 752, 286);
-    lv_obj_set_pos(card, 24, 50);
-    lv_obj_set_style_bg_color(card, C_PANEL, 0);
-    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(card, 16, 0);
-    lv_obj_set_style_border_color(card, C_PANEL_BRD, 0);
-    lv_obj_set_style_border_width(card, 1, 0);
-    lockNoScroll(card);
+    // Left Card: Closed-Loop Fuel Trims (STFT & LTFT) (366x286 @ 24, 50)
+    lv_obj_t* leftCard = lv_obj_create(scr);
+    lv_obj_remove_style_all(leftCard);
+    lv_obj_set_size(leftCard, 366, 286);
+    lv_obj_set_pos(leftCard, 24, 50);
+    lv_obj_set_style_bg_color(leftCard, C_PANEL, 0);
+    lv_obj_set_style_bg_opa(leftCard, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(leftCard, 16, 0);
+    lv_obj_set_style_border_color(leftCard, C_PANEL_BRD, 0);
+    lv_obj_set_style_border_width(leftCard, 1, 0);
+    lockNoScroll(leftCard);
 
-    stftSeg_ = buildDottedArc(card, 130, 80, 30, "STFT", 14);
-    ltftSeg_ = buildDottedArc(card, 130, 260, 30, "LTFT", 14);
+    lv_obj_t* lTitle = lv_label_create(leftCard);
+    lv_obj_set_style_text_font(lTitle, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lTitle, C_CHROME, 0);
+    lv_label_set_text(lTitle, "CLOSED-LOOP FUEL TRIMS");
+    lv_obj_align(lTitle, LV_ALIGN_TOP_LEFT, 14, 12);
+    lockNoScroll(lTitle);
 
-    lv_obj_t* info = lv_obj_create(card);
-    lv_obj_remove_style_all(info);
-    lv_obj_set_size(info, 280, 180);
-    lv_obj_set_pos(info, 440, 30);
-    lv_obj_set_style_bg_color(info, lv_color_hex(0x0E1013), 0);
-    lv_obj_set_style_bg_opa(info, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(info, 12, 0);
-    lv_obj_set_style_border_color(info, C_PANEL_BRD, 0);
-    lv_obj_set_style_border_width(info, 1, 0);
-    lockNoScroll(info);
+    stftSeg_ = buildDottedArc(leftCard, 126, 30, 48, "SHORT TRIM", 14);
+    ltftSeg_ = buildDottedArc(leftCard, 126, 204, 48, "LONG TRIM", 14);
 
-    diagAfrVal_ = lv_label_create(info);
-    lv_obj_set_style_text_font(diagAfrVal_, &lv_font_montserrat_14, 0);
+    lv_obj_t* trimNote = lv_label_create(leftCard);
+    lv_obj_set_style_text_font(trimNote, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(trimNote, C_DIM, 0);
+    lv_label_set_text(trimNote, "Nominal closed-loop feedback window: +/- 10%");
+    lv_obj_align(trimNote, LV_ALIGN_BOTTOM_MID, 0, -12);
+    lockNoScroll(trimNote);
+
+    // Right Top Card: Wideband Air/Fuel Ratio (AFR) (366x136 @ 410, 50)
+    lv_obj_t* afrCard = lv_obj_create(scr);
+    lv_obj_remove_style_all(afrCard);
+    lv_obj_set_size(afrCard, 366, 136);
+    lv_obj_set_pos(afrCard, 410, 50);
+    lv_obj_set_style_bg_color(afrCard, C_PANEL, 0);
+    lv_obj_set_style_bg_opa(afrCard, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(afrCard, 16, 0);
+    lv_obj_set_style_border_color(afrCard, C_PANEL_BRD, 0);
+    lv_obj_set_style_border_width(afrCard, 1, 0);
+    lockNoScroll(afrCard);
+
+    lv_obj_t* aTitle = lv_label_create(afrCard);
+    lv_obj_set_style_text_font(aTitle, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(aTitle, C_CHROME, 0);
+    lv_label_set_text(aTitle, "WIDEBAND AIR / FUEL RATIO (AFR)");
+    lv_obj_align(aTitle, LV_ALIGN_TOP_LEFT, 14, 12);
+    lockNoScroll(aTitle);
+
+    diagAfrVal_ = lv_label_create(afrCard);
+    lv_obj_set_style_text_font(diagAfrVal_, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(diagAfrVal_, C_SPEED, 0);
-    lv_label_set_text(diagAfrVal_, "Air/Fuel Ratio: --");
-    lv_obj_align(diagAfrVal_, LV_ALIGN_TOP_LEFT, 16, 20);
+    lv_label_set_text(diagAfrVal_, "-- : 1");
+    lv_obj_align(diagAfrVal_, LV_ALIGN_LEFT_MID, 16, 4);
     lockNoScroll(diagAfrVal_);
 
-    diagHpfpVal_ = lv_label_create(info);
-    lv_obj_set_style_text_font(diagHpfpVal_, &lv_font_montserrat_14, 0);
+    lv_obj_t* afrSub = lv_label_create(afrCard);
+    lv_obj_set_style_text_font(afrSub, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(afrSub, C_DIM, 0);
+    lv_label_set_text(afrSub, "Target: 14.70 : 1 Stoichiometric (Lambda 1.00)");
+    lv_obj_align(afrSub, LV_ALIGN_BOTTOM_LEFT, 16, -10);
+    lockNoScroll(afrSub);
+
+    // Right Bottom Card: DI High-Pressure Fuel Rail (HPFP) (366x136 @ 410, 200)
+    lv_obj_t* hpfpCard = lv_obj_create(scr);
+    lv_obj_remove_style_all(hpfpCard);
+    lv_obj_set_size(hpfpCard, 366, 136);
+    lv_obj_set_pos(hpfpCard, 410, 200);
+    lv_obj_set_style_bg_color(hpfpCard, C_PANEL, 0);
+    lv_obj_set_style_bg_opa(hpfpCard, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(hpfpCard, 16, 0);
+    lv_obj_set_style_border_color(hpfpCard, C_PANEL_BRD, 0);
+    lv_obj_set_style_border_width(hpfpCard, 1, 0);
+    lockNoScroll(hpfpCard);
+
+    lv_obj_t* hTitle = lv_label_create(hpfpCard);
+    lv_obj_set_style_text_font(hTitle, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(hTitle, C_CHROME, 0);
+    lv_label_set_text(hTitle, "DI HIGH-PRESSURE FUEL RAIL (HPFP)");
+    lv_obj_align(hTitle, LV_ALIGN_TOP_LEFT, 14, 12);
+    lockNoScroll(hTitle);
+
+    diagHpfpVal_ = lv_label_create(hpfpCard);
+    lv_obj_set_style_text_font(diagHpfpVal_, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(diagHpfpVal_, C_SPEED, 0);
-    lv_label_set_text(diagHpfpVal_, "Rail Pressure: -- PSI");
-    lv_obj_align(diagHpfpVal_, LV_ALIGN_TOP_LEFT, 16, 60);
+    lv_label_set_text(diagHpfpVal_, "-- PSI");
+    lv_obj_align(diagHpfpVal_, LV_ALIGN_LEFT_MID, 16, 4);
     lockNoScroll(diagHpfpVal_);
 
-    diagEvapVal_ = lv_label_create(info);
-    lv_obj_set_style_text_font(diagEvapVal_, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(diagEvapVal_, C_SPEED, 0);
-    lv_label_set_text(diagEvapVal_, "EVAP Vapor: --");
-    lv_obj_align(diagEvapVal_, LV_ALIGN_TOP_LEFT, 16, 100);
-    lockNoScroll(diagEvapVal_);
+    lv_obj_t* hpfpSub = lv_label_create(hpfpCard);
+    lv_obj_set_style_text_font(hpfpSub, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(hpfpSub, C_DIM, 0);
+    lv_label_set_text(hpfpSub, "Skyactiv-G Direct Injection (500 - 4,350 PSI)");
+    lv_obj_align(hpfpSub, LV_ALIGN_BOTTOM_LEFT, 16, -10);
+    lockNoScroll(hpfpSub);
+
+    diagEvapVal_ = nullptr;
 
     return scr;
 }
@@ -1729,7 +1746,7 @@ lv_obj_t* AndroidMx5UI::buildDiagSubChassis() {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lockNoScroll(scr);
 
-    speedChipLabel_[SCREEN_DIAG_SUB_CHASSIS] = addSubScreenHeader(scr, "CHASSIS DYNAMICS & G-FORCE", SCREEN_DIAG);
+    speedChipLabel_[SCREEN_DIAG_SUB_CHASSIS] = addSubScreenHeader(scr, "CHASSIS DYNAMICS & G-FORCE", SCREEN_DIAG_SUB_CHASSIS);
 
     // Left Card: Live Dynamics & G-Force (366x286 @ 24, 50)
     lv_obj_t* leftCard = lv_obj_create(scr);
@@ -1790,14 +1807,15 @@ lv_obj_t* AndroidMx5UI::buildDiagSubChassis() {
     lv_obj_set_style_border_width(rightCard, 1, 0);
     lockNoScroll(rightCard);
 
+    bool isAuto = UserPrefs::getTransAuto();
     lv_obj_t* rTitle = lv_label_create(rightCard);
     lv_obj_set_style_text_font(rTitle, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(rTitle, C_CHROME, 0);
-    lv_label_set_text(rTitle, "SKYACTIV 6MT GEAR RATIOS");
+    lv_label_set_text(rTitle, isAuto ? "SKYACTIV-DRIVE 6AT GEAR RATIOS" : "SKYACTIV 6MT GEAR RATIOS");
     lv_obj_align(rTitle, LV_ALIGN_TOP_LEFT, 14, 12);
     lockNoScroll(rTitle);
 
-    const char* gearRatios[6] = {
+    const char* gearRatios6MT[6] = {
         "1st Gear:  5.087 : 1 (Launch)",
         "2nd Gear:  2.991 : 1",
         "3rd Gear:  2.035 : 1",
@@ -1805,6 +1823,15 @@ lv_obj_t* AndroidMx5UI::buildDiagSubChassis() {
         "5th Gear:  1.286 : 1",
         "6th Gear:  1.000 : 1 (Direct)"
     };
+    const char* gearRatios6AT[6] = {
+        "1st Gear:  3.538 : 1 (Launch)",
+        "2nd Gear:  2.060 : 1",
+        "3rd Gear:  1.404 : 1",
+        "4th Gear:  1.000 : 1 (Direct)",
+        "5th Gear:  0.713 : 1 (Overdrive)",
+        "6th Gear:  0.582 : 1 (Overdrive)"
+    };
+    const char* const* gearRatios = isAuto ? gearRatios6AT : gearRatios6MT;
     for (int i = 0; i < 6; i++) {
         lv_obj_t* gLbl = lv_label_create(rightCard);
         lv_obj_set_style_text_font(gLbl, &lv_font_montserrat_12, 0);
@@ -1817,7 +1844,7 @@ lv_obj_t* AndroidMx5UI::buildDiagSubChassis() {
     lv_obj_t* fdLbl = lv_label_create(rightCard);
     lv_obj_set_style_text_font(fdLbl, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(fdLbl, C_OK, 0);
-    lv_label_set_text(fdLbl, "Final Drive: 2.866 : 1 (Super LSD)");
+    lv_label_set_text(fdLbl, isAuto ? "Final Drive: 3.454 : 1 (Open Diff)" : "Final Drive: 2.866 : 1 (Super LSD)");
     lv_obj_align(fdLbl, LV_ALIGN_BOTTOM_LEFT, 14, -14);
     lockNoScroll(fdLbl);
 
@@ -1902,30 +1929,101 @@ lv_obj_t* AndroidMx5UI::buildDiagSubLogs() {
 
     speedChipLabel_[SCREEN_DIAG_SUB_LOGS] = addSubScreenHeader(scr, "DATA LOGS & BLACK BOX", SCREEN_DIAG_SUB_LOGS);
 
-    lv_obj_t* card = lv_obj_create(scr);
-    lv_obj_remove_style_all(card);
-    lv_obj_set_size(card, 752, 286);
-    lv_obj_set_pos(card, 24, 50);
-    lv_obj_set_style_bg_color(card, C_PANEL, 0);
-    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(card, 16, 0);
-    lv_obj_set_style_border_color(card, C_PANEL_BRD, 0);
-    lv_obj_set_style_border_width(card, 1, 0);
-    lockNoScroll(card);
+    // Left Card: Continuous Live Telemetry Logging (366x286 @ 24, 50)
+    lv_obj_t* leftCard = lv_obj_create(scr);
+    lv_obj_remove_style_all(leftCard);
+    lv_obj_set_size(leftCard, 366, 286);
+    lv_obj_set_pos(leftCard, 24, 50);
+    lv_obj_set_style_bg_color(leftCard, C_PANEL, 0);
+    lv_obj_set_style_bg_opa(leftCard, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(leftCard, 16, 0);
+    lv_obj_set_style_border_color(leftCard, C_PANEL_BRD, 0);
+    lv_obj_set_style_border_width(leftCard, 1, 0);
+    lockNoScroll(leftCard);
 
-    sdCardStatusLbl_ = lv_label_create(card);
+    lv_obj_t* lTitle = lv_label_create(leftCard);
+    lv_obj_set_style_text_font(lTitle, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lTitle, C_CHROME, 0);
+    lv_label_set_text(lTitle, "CONTINUOUS TELEMETRY LOGGING");
+    lv_obj_align(lTitle, LV_ALIGN_TOP_LEFT, 14, 12);
+    lockNoScroll(lTitle);
+
+    sdCardStatusLbl_ = lv_label_create(leftCard);
     lv_obj_set_style_text_font(sdCardStatusLbl_, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(sdCardStatusLbl_, C_OK, 0);
-    lv_label_set_text(sdCardStatusLbl_, "Storage: Ready • Rolling Live CSV Logging Active");
-    lv_obj_align(sdCardStatusLbl_, LV_ALIGN_TOP_LEFT, 24, 16);
+    lv_label_set_text(sdCardStatusLbl_, "Storage: Flash • Active Logging");
+    lv_obj_align(sdCardStatusLbl_, LV_ALIGN_TOP_LEFT, 14, 38);
     lockNoScroll(sdCardStatusLbl_);
 
-    incidentTitleLbl_ = lv_label_create(card);
+    const char* logDetails[4] = {
+        "Sampling Rate: ~40 Hz (25ms loop)",
+        "Active Channels: 28 SAE PIDs & DIDs",
+        "Rolling Ring Buffer: 60s Pre-Incident",
+        "Flash Format: CSV (Auto-Flushed)"
+    };
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* dLbl = lv_label_create(leftCard);
+        lv_obj_set_style_text_font(dLbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(dLbl, C_DIM, 0);
+        lv_label_set_text(dLbl, logDetails[i]);
+        lv_obj_align(dLbl, LV_ALIGN_TOP_LEFT, 14, 75 + i * 26);
+        lockNoScroll(dLbl);
+    }
+
+    lv_obj_t* lFoot = lv_label_create(leftCard);
+    lv_obj_set_style_text_font(lFoot, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(lFoot, C_CHROME, 0);
+    lv_label_set_text(lFoot, "Continuous background session active");
+    lv_obj_align(lFoot, LV_ALIGN_BOTTOM_LEFT, 14, -12);
+    lockNoScroll(lFoot);
+
+    // Right Card: Black Box Incident Recorder (366x286 @ 410, 50)
+    lv_obj_t* rightCard = lv_obj_create(scr);
+    lv_obj_remove_style_all(rightCard);
+    lv_obj_set_size(rightCard, 366, 286);
+    lv_obj_set_pos(rightCard, 410, 50);
+    lv_obj_set_style_bg_color(rightCard, C_PANEL, 0);
+    lv_obj_set_style_bg_opa(rightCard, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(rightCard, 16, 0);
+    lv_obj_set_style_border_color(rightCard, C_PANEL_BRD, 0);
+    lv_obj_set_style_border_width(rightCard, 1, 0);
+    lockNoScroll(rightCard);
+
+    incidentTitleLbl_ = lv_label_create(rightCard);
     lv_obj_set_style_text_font(incidentTitleLbl_, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(incidentTitleLbl_, C_CHROME, 0);
-    lv_label_set_text(incidentTitleLbl_, "Continuous Telemetry Buffer: 100% Operational");
-    lv_obj_align(incidentTitleLbl_, LV_ALIGN_TOP_LEFT, 24, 60);
+    lv_label_set_text(incidentTitleLbl_, "BLACK BOX INCIDENT RECORDER");
+    lv_obj_align(incidentTitleLbl_, LV_ALIGN_TOP_LEFT, 14, 12);
     lockNoScroll(incidentTitleLbl_);
+
+    lv_obj_t* incStatus = lv_label_create(rightCard);
+    lv_obj_set_style_text_font(incStatus, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(incStatus, C_OK, 0);
+    lv_label_set_text(incStatus, "Triggers: Armed • 0 Fault Latch");
+    lv_obj_align(incStatus, LV_ALIGN_TOP_LEFT, 14, 38);
+    lockNoScroll(incStatus);
+
+    const char* triggers[4] = {
+        "1. Coolant Temp Spike (> 226 °F)",
+        "2. Engine Oil Temp Spike (> 250 °F)",
+        "3. Knock Retard Spike (> 2.0 deg)",
+        "4. Hard Braking / ABS (> 0.85g)"
+    };
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* tLbl = lv_label_create(rightCard);
+        lv_obj_set_style_text_font(tLbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(tLbl, C_TEXT, 0);
+        lv_label_set_text(tLbl, triggers[i]);
+        lv_obj_align(tLbl, LV_ALIGN_TOP_LEFT, 14, 75 + i * 26);
+        lockNoScroll(tLbl);
+    }
+
+    lv_obj_t* rFoot = lv_label_create(rightCard);
+    lv_obj_set_style_text_font(rFoot, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(rFoot, C_DIM, 0);
+    lv_label_set_text(rFoot, "Telemetry snap auto-saved on trigger");
+    lv_obj_align(rFoot, LV_ALIGN_BOTTOM_LEFT, 14, -12);
+    lockNoScroll(rFoot);
 
     return scr;
 }
@@ -1979,6 +2077,7 @@ void AndroidMx5UI::buildDtcRepairModal(lv_obj_t* parent) {
     lv_obj_set_style_text_color(cLbl, C_TEXT, 0);
     lv_label_set_text(cLbl, "CLOSE");
     lv_obj_center(cLbl);
+    lv_obj_remove_flag(cLbl, LV_OBJ_FLAG_CLICKABLE);
     lockNoScroll(cLbl);
     dtcModalCloseLbl_ = cLbl;
 }
@@ -1996,7 +2095,7 @@ lv_obj_t* AndroidMx5UI::buildBleConfigScreen() {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lockNoScroll(scr);
 
-    speedChipLabel_[SCREEN_BLE_CONFIG] = addSubScreenHeader(scr, "OBD-II ADAPTER & BLUETOOTH", SCREEN_SETTINGS);
+    speedChipLabel_[SCREEN_BLE_CONFIG] = addSubScreenHeader(scr, "OBD-II ADAPTER & BLUETOOTH", SCREEN_BLE_CONFIG);
 
     // Left Card: Connected Device Status (366x286 @ 24, 50)
     lv_obj_t* leftCard = lv_obj_create(scr);
@@ -2020,7 +2119,7 @@ lv_obj_t* AndroidMx5UI::buildBleConfigScreen() {
     lv_obj_t* devNameLbl = lv_label_create(leftCard);
     lv_obj_set_style_text_font(devNameLbl, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(devNameLbl, C_OK, 0);
-    lv_label_set_text(devNameLbl, "● vLinker MS (Connected)");
+    lv_label_set_text(devNameLbl, "vLinker MS (Connected)");
     lv_obj_align(devNameLbl, LV_ALIGN_TOP_LEFT, 14, 38);
     lockNoScroll(devNameLbl);
 
@@ -2072,6 +2171,7 @@ lv_obj_t* AndroidMx5UI::buildBleConfigScreen() {
     lv_obj_set_style_text_color(sLbl, C_TEXT, 0);
     lv_label_set_text(sLbl, "AUTO-RECONNECT TO PAIRED ADAPTER");
     lv_obj_center(sLbl);
+    lv_obj_remove_flag(sLbl, LV_OBJ_FLAG_CLICKABLE);
     lockNoScroll(sLbl);
 
     lv_obj_t* noteLbl = lv_label_create(rightCard);
@@ -2084,7 +2184,80 @@ lv_obj_t* AndroidMx5UI::buildBleConfigScreen() {
     return scr;
 }
 
-lv_obj_t* AndroidMx5UI::buildSetupWizard() { return lv_obj_create(NULL); }
+lv_obj_t* AndroidMx5UI::buildSetupWizard() {
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_remove_style_all(scr);
+    lv_obj_set_style_bg_color(scr, C_BG, 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lockNoScroll(scr);
+
+    speedChipLabel_[SCREEN_WIZARD] = addSubScreenHeader(scr, "INITIAL SETUP WIZARD", SCREEN_WIZARD);
+
+    // Main Card (752x286 @ 24, 50)
+    lv_obj_t* card = lv_obj_create(scr);
+    lv_obj_remove_style_all(card);
+    lv_obj_set_size(card, 752, 286);
+    lv_obj_set_pos(card, 24, 50);
+    lv_obj_set_style_bg_color(card, C_PANEL, 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 16, 0);
+    lv_obj_set_style_border_color(card, C_PANEL_BRD, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lockNoScroll(card);
+
+    lv_obj_t* wTitle = lv_label_create(card);
+    lv_obj_set_style_text_font(wTitle, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(wTitle, C_ACCENT, 0);
+    lv_label_set_text(wTitle, "WELCOME TO MX-5 ND2 DIGITAL CLUSTER");
+    lv_obj_align(wTitle, LV_ALIGN_TOP_LEFT, 24, 18);
+    lockNoScroll(wTitle);
+
+    const char* steps[4] = {
+        "1. Verify OBD-II Scanner Connection (vLinker MS / OBDLink / ELM327)",
+        "2. Configure Transmission (Automatic 6AT vs Manual 6MT) & Measurement Units",
+        "3. Calibrate 4-Corner TPMS Wheel Sensor ID Binding (DIDs 2A05 - 2A08)",
+        "4. High-Refresh Telemetry Engine & Continuous Incident Datalogger Ready"
+    };
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t* sLbl = lv_label_create(card);
+        lv_obj_set_style_text_font(sLbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(sLbl, C_TEXT, 0);
+        lv_label_set_text(sLbl, steps[i]);
+        lv_obj_align(sLbl, LV_ALIGN_TOP_LEFT, 24, 56 + i * 36);
+        lockNoScroll(sLbl);
+    }
+
+    auto makeWizBtn = [this](lv_obj_t* parent, int16_t x, int16_t y, int16_t w, int16_t h, const char* txt, uintptr_t id, lv_color_t bgCol) -> lv_obj_t* {
+        lv_obj_t* b = lv_obj_create(parent);
+        lv_obj_remove_style_all(b);
+        lv_obj_set_size(b, w, h);
+        lv_obj_set_pos(b, x, y);
+        lv_obj_set_style_bg_color(b, bgCol, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(b, 10, 0);
+        lv_obj_set_style_border_color(b, C_PANEL_BRD, 0);
+        lv_obj_set_style_border_width(b, 1, 0);
+        lv_obj_set_user_data(b, (void*)id);
+        lv_obj_add_event_cb(b, onWizardActionClick, LV_EVENT_CLICKED, this);
+        lockNoScroll(b);
+
+        lv_obj_t* l = lv_label_create(b);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(l, C_TEXT, 0);
+        lv_label_set_text(l, txt);
+        lv_obj_center(l);
+        lv_obj_remove_flag(l, LV_OBJ_FLAG_CLICKABLE);
+        lockNoScroll(l);
+        return b;
+    };
+
+    makeWizBtn(card, 24, 220, 160, 44, "BLUETOOTH SETUP", 401, lv_color_hex(0x191A20));
+    makeWizBtn(card, 200, 220, 160, 44, "SETTINGS / UNITS", 402, lv_color_hex(0x191A20));
+    makeWizBtn(card, 376, 220, 160, 44, "TPMS LEARN", 403, lv_color_hex(0x191A20));
+    makeWizBtn(card, 552, 220, 176, 44, "FINISH SETUP", 404, C_ACCENT);
+
+    return scr;
+}
 
 // ---------------------------------------------------------------------------
 // Screen 16 - TPMS Wheel Calibration & Sensor Binding
@@ -2096,7 +2269,7 @@ lv_obj_t* AndroidMx5UI::buildWheelMapScreen() {
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lockNoScroll(scr);
 
-    speedChipLabel_[SCREEN_WHEEL_MAP] = addSubScreenHeader(scr, "TPMS WHEEL CALIBRATION", SCREEN_SETTINGS);
+    speedChipLabel_[SCREEN_WHEEL_MAP] = addSubScreenHeader(scr, "TPMS WHEEL CALIBRATION", SCREEN_WHEEL_MAP);
 
     // Left Panel: 4 Wheel Target Cards & Chassis (460x286 @ 24, 50)
     lv_obj_t* leftCard = lv_obj_create(scr);
@@ -2141,6 +2314,7 @@ lv_obj_t* AndroidMx5UI::buildWheelMapScreen() {
         lv_obj_set_style_text_color(tag, (i == 0) ? C_ACCENT : C_CHROME, 0);
         lv_label_set_text(tag, names[i]);
         lv_obj_align(tag, LV_ALIGN_TOP_LEFT, 10, 8);
+        lv_obj_remove_flag(tag, LV_OBJ_FLAG_CLICKABLE);
         lockNoScroll(tag);
         wheelCellLbl_[i] = tag;
 
@@ -2149,14 +2323,16 @@ lv_obj_t* AndroidMx5UI::buildWheelMapScreen() {
         lv_obj_set_style_text_color(didLbl, C_OK, 0);
         lv_label_set_text(didLbl, defDids[i]);
         lv_obj_align(didLbl, LV_ALIGN_LEFT_MID, 10, -4);
+        lv_obj_remove_flag(didLbl, LV_OBJ_FLAG_CLICKABLE);
         lockNoScroll(didLbl);
         wheelCellDid_[i] = didLbl;
 
         lv_obj_t* pressLbl = lv_label_create(cell);
         lv_obj_set_style_text_font(pressLbl, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(pressLbl, C_SPEED, 0);
-        lv_label_set_text(pressLbl, "32.0 PSI");
+        lv_label_set_text(pressLbl, "-- PSI");
         lv_obj_align(pressLbl, LV_ALIGN_BOTTOM_LEFT, 10, -8);
+        lv_obj_remove_flag(pressLbl, LV_OBJ_FLAG_CLICKABLE);
         lockNoScroll(pressLbl);
         wheelCellPress_[i] = pressLbl;
     }
@@ -2208,6 +2384,7 @@ lv_obj_t* AndroidMx5UI::buildWheelMapScreen() {
     lv_obj_set_style_text_color(aLbl, C_TEXT, 0);
     lv_label_set_text(aLbl, "AUTO-BIND DETECTED SENSORS");
     lv_obj_center(aLbl);
+    lv_obj_remove_flag(aLbl, LV_OBJ_FLAG_CLICKABLE);
     lockNoScroll(aLbl);
 
     // Action 302: Reset
@@ -2229,6 +2406,7 @@ lv_obj_t* AndroidMx5UI::buildWheelMapScreen() {
     lv_obj_set_style_text_color(rstLbl, C_DIM, 0);
     lv_label_set_text(rstLbl, "RESET TO FACTORY DIDs");
     lv_obj_center(rstLbl);
+    lv_obj_remove_flag(rstLbl, LV_OBJ_FLAG_CLICKABLE);
     lockNoScroll(rstLbl);
 
     return scr;
@@ -2265,22 +2443,36 @@ void AndroidMx5UI::begin() {
         }
     }
 
-    setScreen(SCREEN_SPEED);
+    if (!UserPrefs::isConfigured()) {
+        setScreen(SCREEN_WIZARD);
+    } else {
+        setScreen(SCREEN_SPEED);
+    }
 }
 
 void AndroidMx5UI::update() {
     obd_.snapshot(data_local_);
 
     updateSpeedChip();
-    updateSpeedScreen();
-    updateTpmsScreen();
-    updateRpmScreen();
-    updateEngineScreen();
-    updateTrackScreen();
-    updateTripScreen();
-    updateDiagnosticsScreen();
-    updateMenuScreen();
-    updateDiagSubChassis();
+
+    switch (currentScreen_) {
+        case SCREEN_SPEED:            updateSpeedScreen();       break;
+        case SCREEN_TPMS:             updateTpmsScreen();        break;
+        case SCREEN_TEMPS:            updateEngineScreen();      break;
+        case SCREEN_DIAG:             updateDiagnosticsScreen(); break;
+        case SCREEN_TRACK:            updateTrackScreen();       break;
+        case SCREEN_RPM:              updateRpmScreen();         break;
+        case SCREEN_TRIP:             updateTripScreen();        break;
+        case SCREEN_MENU:             updateMenuScreen();        break;
+
+        case SCREEN_DIAG_SUB_FUEL:    updateDiagSubFuel();       break;
+        case SCREEN_DIAG_SUB_CYL:     updateDiagSubCyl();        break;
+        case SCREEN_DIAG_SUB_CHASSIS: updateDiagSubChassis();    break;
+        case SCREEN_DIAG_SUB_SMOG:    updateDiagSubSmog();       break;
+        case SCREEN_DIAG_SUB_LOGS:    updateDiagSubLogs();       break;
+        case SCREEN_WHEEL_MAP:        updateWheelMapScreen();    break;
+        default: break;
+    }
 
     if (themeMode_ == THEME_AUTO) {
         if (data_local_.isNightMode != currentNightMode_) {
@@ -2438,9 +2630,14 @@ void AndroidMx5UI::updateSpeedScreen() {
             lv_label_set_text_fmt(rpmSeg_.val, "%u", data_local_.rpm);
         }
 
-        updateDottedValue(fuelSeg_, data_local_.fuelLevelPct / 100.0f);
-        if (fuelSeg_.val) {
-            lv_label_set_text_fmt(fuelSeg_.val, "%u%%", data_local_.fuelLevelPct);
+        if (data_local_.fuelLevelPct == 0) {
+            updateDottedValue(fuelSeg_, 0.0f);
+            if (fuelSeg_.val) lv_label_set_text(fuelSeg_.val, "--%");
+        } else {
+            updateDottedValue(fuelSeg_, data_local_.fuelLevelPct / 100.0f);
+            if (fuelSeg_.val) {
+                lv_label_set_text_fmt(fuelSeg_.val, "%u%%", data_local_.fuelLevelPct);
+            }
         }
 
         if (data_local_.ambientC == 0) {
@@ -2793,7 +2990,22 @@ void AndroidMx5UI::onSettingsActionClick(lv_event_t* e) {
 }
 
 void AndroidMx5UI::onBleConfigActionClick(lv_event_t*) {}
-void AndroidMx5UI::onWizardActionClick(lv_event_t*) {}
+void AndroidMx5UI::onWizardActionClick(lv_event_t* e) {
+    auto* ui = static_cast<AndroidMx5UI*>(lv_event_get_user_data(e));
+    if (!ui) return;
+    lv_obj_t* targetObj = (lv_obj_t*)lv_event_get_current_target(e);
+    uintptr_t action = (uintptr_t)lv_obj_get_user_data(targetObj);
+
+    switch (action) {
+        case 401: ui->setScreen(SCREEN_BLE_CONFIG); break;
+        case 402: ui->setScreen(SCREEN_SETTINGS); break;
+        case 403: ui->setScreen(SCREEN_WHEEL_MAP); break;
+        case 404:
+            UserPrefs::saveConfigured(true);
+            ui->setScreen(SCREEN_SPEED);
+            break;
+    }
+}
 
 void AndroidMx5UI::onWheelMapActionClick(lv_event_t* e) {
     auto* ui = static_cast<AndroidMx5UI*>(lv_event_get_user_data(e));
@@ -2846,33 +3058,40 @@ void AndroidMx5UI::onWheelMapActionClick(lv_event_t* e) {
 }
 
 void AndroidMx5UI::updateDiagSubFuel() {
-    float stftFrac = (data_local_.shortTermFuelTrimPct + 25.0f) / 50.0f;
-    updateDottedValue(stftSeg_, stftFrac);
-    if (stftSeg_.val) lv_label_set_text_fmt(stftSeg_.val, "%+.1f%%", data_local_.shortTermFuelTrimPct);
+    if (data_local_.coolantC == 0 && data_local_.rpm == 0) {
+        updateDottedValue(stftSeg_, 0.5f);
+        if (stftSeg_.val) lv_label_set_text(stftSeg_.val, "--%");
+        updateDottedValue(ltftSeg_, 0.5f);
+        if (ltftSeg_.val) lv_label_set_text(ltftSeg_.val, "--%");
+    } else {
+        float stftFrac = (data_local_.shortTermFuelTrimPct + 25.0f) / 50.0f;
+        updateDottedValue(stftSeg_, stftFrac);
+        if (stftSeg_.val) lv_label_set_text_fmt(stftSeg_.val, "%+.1f%%", data_local_.shortTermFuelTrimPct);
 
-    float ltftFrac = (data_local_.longTermFuelTrimPct + 25.0f) / 50.0f;
-    updateDottedValue(ltftSeg_, ltftFrac);
-    if (ltftSeg_.val) lv_label_set_text_fmt(ltftSeg_.val, "%+.1f%%", data_local_.longTermFuelTrimPct);
+        float ltftFrac = (data_local_.longTermFuelTrimPct + 25.0f) / 50.0f;
+        updateDottedValue(ltftSeg_, ltftFrac);
+        if (ltftSeg_.val) lv_label_set_text_fmt(ltftSeg_.val, "%+.1f%%", data_local_.longTermFuelTrimPct);
+    }
 
     if (diagAfrVal_) {
         if (data_local_.airFuelRatio <= 0.01f) {
-            lv_label_set_text(diagAfrVal_, "Air/Fuel Ratio: --");
+            lv_label_set_text(diagAfrVal_, "-- : 1");
         } else {
-            lv_label_set_text_fmt(diagAfrVal_, "Air/Fuel Ratio: %.2f : 1", data_local_.airFuelRatio);
+            lv_label_set_text_fmt(diagAfrVal_, "%.2f : 1", data_local_.airFuelRatio);
         }
     }
     if (diagHpfpVal_) {
         if (data_local_.fuelRailPressurePsi == 0) {
-            lv_label_set_text(diagHpfpVal_, "Rail Pressure: 0 PSI");
+            lv_label_set_text(diagHpfpVal_, "-- PSI");
         } else {
-            lv_label_set_text_fmt(diagHpfpVal_, "Rail Pressure: %u PSI", data_local_.fuelRailPressurePsi);
+            lv_label_set_text_fmt(diagHpfpVal_, "%u PSI", data_local_.fuelRailPressurePsi);
         }
     }
     if (diagEvapVal_) {
         if (data_local_.evapVaporPa == 0) {
-            lv_label_set_text(diagEvapVal_, "EVAP Vapor: --");
+            lv_label_set_text(diagEvapVal_, "-- Pa");
         } else {
-            lv_label_set_text_fmt(diagEvapVal_, "EVAP Vapor: %+d Pa", data_local_.evapVaporPa);
+            lv_label_set_text_fmt(diagEvapVal_, "%+d Pa", data_local_.evapVaporPa);
         }
     }
 }

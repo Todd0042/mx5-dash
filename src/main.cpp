@@ -39,11 +39,13 @@ void setup() {
         Serial.println("[main] FATAL: display init failed");
     }
 
-    // Apply saved rotation (must happen after display.begin())
+    // Apply saved rotation unconditionally (must happen after display.begin()).
+    // Mirroring the Settings screen's setRotation() call exactly so the panel
+    // always lands on the user's chosen orientation, even when it equals the
+    // compiled default.
     uint8_t savedRot = UserPrefs::getRotation();
-    if (savedRot != MX5_LCD_ROTATION) {
-        display.setRotation(savedRot);
-    }
+    display.setRotation(savedRot);
+    Serial.printf("[main] applied rotation %d\n", savedRot);
 
     // UI screens are built once up front.
     ui.begin();

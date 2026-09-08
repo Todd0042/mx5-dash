@@ -46,9 +46,10 @@ The Mazda SkyActiv-G (ND2) network segregates telemetry across multiple ECU head
    - SkyActiv Engine Oil Temperature: Mode 22 DID `221310` (`621310` $\rightarrow A - 40\ ^\circ\text{C}$).
 2. **BCM & Instrument Cluster (Header `720` / `ATSH 720`)**:
    - 4-Corner TPMS DIDs: `222A05` (FL), `222A06` (FR), `222A07` (RL), `222A08` (RR).
-   - Transmission PRND Selector DID: `222A27` (`1`=P, `2`=R, `3`=N, `4`=D, `5`=M).
-3. **Header Isolation Guarantee**:
-   - Whenever switching to Header `720` (`ATSH 720`) for TPMS or PRND queries, the polling engine **MUST immediately restore** Header `7E0` (`ATSH 7E0`) before continuing engine telemetry queries.
+3. **TCM (Header `7E1` / `ATSH 7E1` - 6AT Automatic Only)**:
+   - Transmission PRND Selector & Commanded Gear DID: `221E12` (`0x60`=R, `0x70`=P, `0x50`=N, `1..6`=Direct TCM Commanded Gear).
+4. **Header Isolation Guarantee**:
+   - Whenever switching to Header `720` (`ATSH 720`) or Header `7E1` (`ATSH 7E1`) for TPMS, PRND, or TCM queries, the polling engine **MUST immediately restore** Header `7E0` (`ATSH 7E0`) before continuing engine telemetry queries.
 
 ---
 
@@ -63,13 +64,18 @@ To ensure testing transparency and avoid masking missing OBD responses:
 
 ## Rule 5: Transmission Architecture & Shifter State Machine
 The dashboard supports both 6AT Automatic (SkyActiv-Drive) and 6MT Manual gearboxes:
-- The user's transmission preference is toggled in Settings (`[AUTO (6AT)]` vs `[MANUAL (6MT)]`) and persisted in NVS / SharedPreferences (`trans_auto`).
+- **Automatic Transmission Auto-Detection**:
+  - During adapter handshake / connection initialization, the firmware/app probes TCM Header `7E1` (`221E12`).
+  - If TCM responds: Auto-detects **`6AT (Automatic)`** and persists `trans_auto = true`.
+  - If TCM does not respond (e.g. `NO DATA` on manual): Auto-detects **`6MT (Manual)`** and persists `trans_auto = false`.
+  - User can also manually toggle preference in Settings (`[AUTO (6AT)]` vs `[MANUAL (6MT)]`) which persists in NVS / SharedPreferences (`trans_auto`).
 - **Automatic (6AT) Mode**:
-  - In Reverse (`tcmPrnd == 'R'`), display **`'R'`** (not gear `1`).
-  - In Park (`tcmPrnd == 'P'`) or stopped at idle ($< 2\text{ km/h}$), display **`'P'`**.
-  - In Neutral (`tcmPrnd == 'N'`), display **`'N'`**.
-  - In Drive / Forward motion, calculate gear ratios `1` through `6` from $\text{RPM} / \text{Speed}$.
+  - In Reverse (`tcmPrnd == 'R'` or `tcmDirectGear == 'R'`), display **`'R'`** (not gear `1`).
+  - In Park (`tcmPrnd == 'P'` or `tcmDirectGear == 'P'`), display **`'P'`**.
+  - In Neutral (`tcmPrnd == 'N'` or `tcmDirectGear == 'N'`), display **`'N'`**.
+  - In Drive / Forward motion: Display true TCM commanded gear `1` through `6` if reported by `221E12`, or calculate gear ratios from $\text{RPM} / \text{Speed}$.
 - **Manual (6MT) Mode**:
+  - In Reverse (`tcmPrnd == 'R'`), display **`'R'`**.
   - Stationary idle ($< 3\text{ km/h}$) displays **`'N'`**.
   - Moving forward calculates gear ratios `1` through `6`.
 

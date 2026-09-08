@@ -42,8 +42,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private var lastConnected: Boolean? = null
+    private var lastStatusLabel: String? = null
+
     private val connectionListener: (Boolean, String) -> Unit = { connected, label ->
         runOnUiThread {
+            if (lastConnected == connected && lastStatusLabel == label) {
+                return@runOnUiThread
+            }
+            lastConnected = connected
+            lastStatusLabel = label
+
             statusPill.animate().cancel()
             statusPill.alpha = 1.0f
             statusPill.visibility = View.VISIBLE

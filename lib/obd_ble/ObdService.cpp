@@ -34,7 +34,8 @@ struct ObdService::Impl {
     uint8_t  prevSpeedKmh = 0;
     uint32_t prevSpeedMs = 0;
     uint32_t lastDimCheckMs = 0;
-    uint32_t lastSafetySweepMs = 0;
+    uint32_t lastBackgroundQueryMs = 0;
+    uint8_t  backgroundStep = 0;
     float    tripTotalDistanceMiles = 0.0f;
     float    tripTotalGallons = 0.0f;
     uint32_t lastTripCalcMs = 0;
@@ -69,12 +70,12 @@ void ObdService::taskMain(void* arg) {
 // Supports both Automatic 6AT (PRND state + 6-speed ratios) and Manual 6MT.
 static char estimateGear(uint16_t rpm, uint8_t speedKmh, bool isAuto, char tcmPrnd, char tcmDirectGear = '-') {
     if (rpm == 0 && speedKmh == 0) return '-';   // no signal yet
+    if (tcmPrnd == 'R' || tcmDirectGear == 'R') return 'R';
     if (isAuto) {
-        if (tcmPrnd == 'R') return 'R';
-        if (tcmPrnd == 'P') return 'P';
-        if (tcmPrnd == 'N') return 'N';
-        if (speedKmh < 2) return (rpm > 400) ? 'P' : '-';
+        if (tcmPrnd == 'P' || tcmDirectGear == 'P') return 'P';
+        if (tcmPrnd == 'N' || tcmDirectGear == 'N') return 'N';
         if (tcmDirectGear >= '1' && tcmDirectGear <= '6') return tcmDirectGear;
+        if (speedKmh < 2) return (rpm > 400) ? 'P' : '-';
 
         // SkyActiv-Drive RC6A-EL 6AT Physical Gear Ratios (2.866 Final Drive)
         float r = (float)rpm / (float)(speedKmh > 0 ? speedKmh : 1);
@@ -98,11 +99,54 @@ static char estimateGear(uint16_t rpm, uint8_t speedKmh, bool isAuto, char tcmPr
     }
 }
 
+static bool parseMode22Bytes(const char* resp, const char* didHex, uint8_t* out, uint8_t n);
+
+static void decodeTcmGear(uint8_t b, char& prnd, char& directGear) {
+    if (b == 0x60) {
+        prnd = 'R';
+        directGear = 'R';
+    } else if (b == 0x70) {
+        prnd = 'P';
+        directGear = 'P';
+    } else if (b == 0x50) {
+        prnd = 'N';
+        directGear = 'N';
+    } else if (b >= 1 && b <= 6) {
+        prnd = 'D';
+        directGear = (char)('0' + b);
+    } else if ((b & 0xF0) != 0 && (b & 0x0F) >= 1 && (b & 0x0F) <= 6) {
+        prnd = 'D';
+        directGear = (char)('0' + (b & 0x0F));
+    }
+}
+
 void ObdService::loopTask() {
     Impl* p = impl_;
+    bool wasConnected = false;
     for (;;) {
         p->elm.loop();                     // keep BLE + ELM handshake healthy
-        connected_ = p->elm.isInitialized();
+        bool isInit = p->elm.isInitialized();
+        if (isInit && !wasConnected) {
+            // New connection established: Probe TCM (Header 7E1) to auto-detect 6AT vs 6MT
+            char probeResp[BleElm::MAX_RESPONSE];
+            p->elm.sendQuery("ATSH 7E1", probeResp, sizeof(probeResp), 200);
+            bool hasTcm = false;
+            if (p->elm.sendQuery("221E12", probeResp, sizeof(probeResp), 300)) {
+                uint8_t dummy[1];
+                if (parseMode22Bytes(probeResp, "1E12", dummy, 1) || 
+                    (!strstr(probeResp, "NO DATA") && !strstr(probeResp, "ERROR") && strlen(probeResp) >= 6)) {
+                    hasTcm = true;
+                }
+            }
+            p->elm.sendQuery("ATSH 7E0", probeResp, sizeof(probeResp), 150);
+            UserPrefs::saveTransAuto(hasTcm);
+            portENTER_CRITICAL(&p->mux);
+            p->data.isAutomatic = hasTcm;
+            portEXIT_CRITICAL(&p->mux);
+            Serial.printf("[ObdService] Transmission auto-detected: %s\n", hasTcm ? "6AT (Automatic)" : "6MT (Manual)");
+        }
+        wasConnected = isInit;
+        connected_ = isInit;
         uint32_t now = millis();
 
         // Frozen (setup wizard on screen): stop normal PID polling, keep BLE up.
@@ -120,7 +164,6 @@ void ObdService::loopTask() {
 
         if (connected_) {
             pollTick(*p, now);
-            if (MX5_TPMS_ENABLED) pollTpms(*p, now);
 
             // Compute dynamic derived metrics across frames
             portENTER_CRITICAL(&p->mux);
@@ -342,94 +385,246 @@ void ObdService::setActiveScreen(uint8_t screenIndex) {
     portEXIT_CRITICAL(&impl_->mux);
 }
 
+void ObdService::executeNextBackgroundQuery(Impl& i, uint32_t now, uint8_t screen, uint8_t step) {
+    uint8_t b = 0;
+    char resp[BleElm::MAX_RESPONSE];
+    switch (step) {
+        case 0: // Coolant (0105 on PCM 7E0) - skip if on Temps (2)
+            if (screen != 2) {
+                if (ObdService::readUint8(i, "0105", "05", b)) {
+                    portENTER_CRITICAL(&i.mux);
+                    i.data.coolantC = b > 40 ? b - 40 : 0;
+                    portEXIT_CRITICAL(&i.mux);
+                }
+            }
+            break;
+        case 1: // Oil Temp (221310 on PCM 7E0) - skip if on Temps (2)
+            if (screen != 2) {
+                if (i.elm.sendQuery("221310", resp, sizeof(resp), 350)) {
+                    uint8_t ob[2];
+                    if (parseMode22Bytes(resp, "1310", ob, 2)) {
+                        float tempC = (((float)((ob[0] << 8) | ob[1])) / 100.0f) - 40.0f;
+                        if (tempC >= 0.0f && tempC <= 160.0f) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.oilTempC = (uint8_t)(tempC + 0.5f);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
+                    } else if (parseMode22Bytes(resp, "1310", ob, 1) && ob[0] > 40) {
+                        portENTER_CRITICAL(&i.mux);
+                        i.data.oilTempC = ob[0] - 40;
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                }
+            }
+            break;
+        case 2: // Ambient Temp (0146 on PCM 7E0) - skip if on TPMS (1) or Temps (2)
+            if (screen != 1 && screen != 2) {
+                if (ObdService::readUint8(i, "0146", "46", b)) {
+                    int16_t temp = (int16_t)b - 40;
+                    if (temp >= -40 && temp <= 60) {
+                        portENTER_CRITICAL(&i.mux);
+                        i.data.ambientC = (uint8_t)(temp > 0 ? temp : 0);
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                }
+            }
+            break;
+        case 3: // Battery Volts (0142 on PCM 7E0) - skip if on Temps (2)
+            if (screen != 2) {
+                uint16_t batTmp = 0;
+                if (ObdService::readUint16(i, "0142", "42", batTmp)) {
+                    portENTER_CRITICAL(&i.mux);
+                    i.data.batteryVolts = (float)batTmp / 1000.0f;
+                    portEXIT_CRITICAL(&i.mux);
+                }
+            }
+            break;
+        case 4: // Intake Air Temp (010F on PCM 7E0) - skip if on Temps (2)
+            if (screen != 2) {
+                if (ObdService::readUint8(i, "010F", "0F", b)) {
+                    portENTER_CRITICAL(&i.mux);
+                    i.data.intakeAirC = b > 40 ? b - 40 : 0;
+                    portEXIT_CRITICAL(&i.mux);
+                }
+            }
+            break;
+        case 5: // TPMS FL (222A05 on BCM 720) - skip if on TPMS (1)
+            if (screen != 1) {
+                i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
+                if (i.elm.sendQuery("222A05", resp, sizeof(resp), 300)) {
+                    uint8_t ob[2];
+                    if (parseMode22Bytes(resp, "2A05", ob, 2)) {
+                        portENTER_CRITICAL(&i.mux);
+                        float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
+                        i.data.tirePressure[0] = psi / 14.5038f;
+                        i.data.tireTemp[0] = (float)ob[1] - 40.0f;
+                        i.data.tireKnown[0] = true;
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                }
+                i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+            }
+            break;
+        case 6: // TPMS FR (222A06 on BCM 720) - skip if on TPMS (1)
+            if (screen != 1) {
+                i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
+                if (i.elm.sendQuery("222A06", resp, sizeof(resp), 300)) {
+                    uint8_t ob[2];
+                    if (parseMode22Bytes(resp, "2A06", ob, 2)) {
+                        portENTER_CRITICAL(&i.mux);
+                        float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
+                        i.data.tirePressure[1] = psi / 14.5038f;
+                        i.data.tireTemp[1] = (float)ob[1] - 40.0f;
+                        i.data.tireKnown[1] = true;
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                }
+                i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+            }
+            break;
+        case 7: // TPMS RL (222A07 on BCM 720) - skip if on TPMS (1)
+            if (screen != 1) {
+                i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
+                if (i.elm.sendQuery("222A07", resp, sizeof(resp), 300)) {
+                    uint8_t ob[2];
+                    if (parseMode22Bytes(resp, "2A07", ob, 2)) {
+                        portENTER_CRITICAL(&i.mux);
+                        float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
+                        i.data.tirePressure[2] = psi / 14.5038f;
+                        i.data.tireTemp[2] = (float)ob[1] - 40.0f;
+                        i.data.tireKnown[2] = true;
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                }
+                i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+            }
+            break;
+        case 8: // TPMS RR (222A08 on BCM 720) - skip if on TPMS (1)
+            if (screen != 1) {
+                i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
+                if (i.elm.sendQuery("222A08", resp, sizeof(resp), 300)) {
+                    uint8_t ob[2];
+                    if (parseMode22Bytes(resp, "2A08", ob, 2)) {
+                        portENTER_CRITICAL(&i.mux);
+                        float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
+                        i.data.tirePressure[3] = psi / 14.5038f;
+                        i.data.tireTemp[3] = (float)ob[1] - 40.0f;
+                        i.data.tireKnown[3] = true;
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                }
+                i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+            }
+            break;
+        case 9: // TCM Gear & PRND (221E12 on TCM 7E1 - only on Automatic)
+            if (i.data.isAutomatic && screen != 0 && screen != 1) {
+                i.elm.sendQuery("ATSH 7E1", resp, sizeof(resp), 150);
+                if (i.elm.sendQuery("221E12", resp, sizeof(resp), 250)) {
+                    uint8_t ob[1];
+                    if (parseMode22Bytes(resp, "1E12", ob, 1)) {
+                        char prnd = '-', directGear = '-';
+                        decodeTcmGear(ob[0], prnd, directGear);
+                        portENTER_CRITICAL(&i.mux);
+                        i.data.tcmPrnd = prnd;
+                        i.tcmDirectGear = directGear;
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                }
+                i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+            }
+            break;
+    }
+}
+
 void ObdService::pollTick(Impl& i, uint32_t now) {
     uint16_t tmp = 0;
     uint8_t b = 0;
 
-    // 1. ALWAYS Poll High-Priority Speed (010D)
-    if (now - i.lastSeqMs >= MX5_POLL_FAST_MS) {
-        i.lastSeqMs = now;
-        if (readUint8(i, "010D", "0D", b)) {
-            portENTER_CRITICAL(&i.mux);
-            i.data.speedKmh = b;
-            portEXIT_CRITICAL(&i.mux);
-        }
-    }
-
     uint8_t screen = i.activeScreen_;
     i.slowIdx = (i.slowIdx + 1) % 16;
 
-    // 2. 25-Second Safety Sweep (TPMS + Critical Overheat + Battery Volts + Ambient Temp when not on Screen 1)
-    if (now - i.lastSafetySweepMs > 25000 && screen != 1) {
-        i.lastSafetySweepMs = now;
-        pollTpms(i, now);
-        if (readUint8(i, "0105", "05", b)) {
-            portENTER_CRITICAL(&i.mux);
-            i.data.coolantC = b > 40 ? b - 40 : 0;
-            portEXIT_CRITICAL(&i.mux);
-        }
-        char resp[BleElm::MAX_RESPONSE];
-        if (i.elm.sendQuery("221310", resp, sizeof(resp), 400)) {
-            uint8_t ob[2];
-            if (parseMode22Bytes(resp, "1310", ob, 2)) {
-                float tempC = (((float)((ob[0] << 8) | ob[1])) / 100.0f) - 40.0f;
-                if (tempC >= 0.0f && tempC <= 160.0f) {
-                    portENTER_CRITICAL(&i.mux);
-                    i.data.oilTempC = (uint8_t)(tempC + 0.5f);
-                    portEXIT_CRITICAL(&i.mux);
-                }
-            } else if (parseMode22Bytes(resp, "1310", ob, 1) && ob[0] > 40) {
+    // 1. High-Priority Speed (010D) for background screens (screens 0 and 4 poll speed directly at high cadence)
+    if (screen != 0 && screen != 4) {
+        if (now - i.lastSeqMs >= MX5_POLL_FAST_MS) {
+            i.lastSeqMs = now;
+            if (readUint8(i, "010D", "0D", b)) {
                 portENTER_CRITICAL(&i.mux);
-                i.data.oilTempC = ob[0] - 40;
+                i.data.speedKmh = b;
                 portEXIT_CRITICAL(&i.mux);
             }
         }
-        uint16_t batTmp = 0;
-        if (readUint16(i, "0142", "42", batTmp)) {
-            portENTER_CRITICAL(&i.mux);
-            i.data.batteryVolts = (float)batTmp / 1000.0f;
-            portEXIT_CRITICAL(&i.mux);
-        }
+    }
+
+    // 2. Interleaved background safety sweep: Polls ONE background metric every 2.5s
+    // Never blocks speed updates (takes at most 50-120ms before speed is polled again)
+    if (now - i.lastBackgroundQueryMs > 2500) {
+        i.lastBackgroundQueryMs = now;
+        executeNextBackgroundQuery(i, now, screen, i.backgroundStep);
+        i.backgroundStep = (i.backgroundStep + 1) % 10;
     } else {
         // 3. View-Driven Command Queue based on active screen
         switch (screen) {
-            // Screen 0: Hero Speedometer -> RPM, Fuel %, TCM Direct Gear
+            // Screen 0: Hero Speedometer -> High-Cadence Interleaved Speed (20Hz), RPM (20Hz), TCM Gear / Fuel %, Engine Load %
             case 0:
-                switch (i.slowIdx % 4) {
-                    case 0:
-                    case 2:
-                        if (readUint16(i, "010C", "0C", tmp)) {
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.rpm = tmp / 4;
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                    case 1:
-                        if (readUint8(i, "012F", "2F", b)) {
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.fuelLevelPct = parseCalibratedFuel(b);
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                    case 3:
-                        if (i.data.isAutomatic) {
-                            char resp[BleElm::MAX_RESPONSE];
-                            i.elm.sendQuery("ATSH 7E1", resp, sizeof(resp), 150);
-                            if (i.elm.sendQuery("221E12", resp, sizeof(resp), 250)) {
-                                uint8_t gb[1];
-                                if (parseMode22Bytes(resp, "1E12", gb, 1) && gb[0] >= 1 && gb[0] <= 6) {
-                                    i.tcmDirectGear = (char)('0' + gb[0]);
-                                }
-                            }
-                            i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
-                        } else {
+                if ((i.slowIdx % 2) == 0) {
+                    // Even tick: High-rate Speed
+                    if (readUint8(i, "010D", "0D", b)) {
+                        portENTER_CRITICAL(&i.mux);
+                        i.data.speedKmh = b;
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                } else {
+                    // Odd tick: Alternating RPM, TCM Direct Gear / Fuel %, Engine Load %
+                    switch ((i.slowIdx / 2) % 4) {
+                        case 0:
+                        case 2:
                             if (readUint16(i, "010C", "0C", tmp)) {
                                 portENTER_CRITICAL(&i.mux);
                                 i.data.rpm = tmp / 4;
                                 portEXIT_CRITICAL(&i.mux);
                             }
-                        }
-                        break;
+                            break;
+                        case 1:
+                            if (i.data.isAutomatic) {
+                                char resp[BleElm::MAX_RESPONSE];
+                                i.elm.sendQuery("ATSH 7E1", resp, sizeof(resp), 150);
+                                if (i.elm.sendQuery("221E12", resp, sizeof(resp), 250)) {
+                                    uint8_t ob[1];
+                                    if (parseMode22Bytes(resp, "1E12", ob, 1)) {
+                                        char prnd = '-', directGear = '-';
+                                        decodeTcmGear(ob[0], prnd, directGear);
+                                        portENTER_CRITICAL(&i.mux);
+                                        i.data.tcmPrnd = prnd;
+                                        i.tcmDirectGear = directGear;
+                                        portEXIT_CRITICAL(&i.mux);
+                                    }
+                                }
+                                i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+                            } else {
+                                if (readUint8(i, "012F", "2F", b)) {
+                                    portENTER_CRITICAL(&i.mux);
+                                    i.data.fuelLevelPct = parseCalibratedFuel(b);
+                                    portEXIT_CRITICAL(&i.mux);
+                                }
+                            }
+                            break;
+                        case 3:
+                            if (i.data.isAutomatic && ((i.slowIdx / 2) % 16) == 7) {
+                                if (readUint8(i, "012F", "2F", b)) {
+                                    portENTER_CRITICAL(&i.mux);
+                                    i.data.fuelLevelPct = parseCalibratedFuel(b);
+                                    portEXIT_CRITICAL(&i.mux);
+                                }
+                            } else {
+                                // Poll Engine Load (0104 on PCM 7E0) - 100% on Header 7E0, zero header hops
+                                if (readUint8(i, "0104", "04", b)) {
+                                    portENTER_CRITICAL(&i.mux);
+                                    i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                                    portEXIT_CRITICAL(&i.mux);
+                                }
+                            }
+                            break;
+                    }
                 }
                 break;
 
@@ -525,63 +720,76 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                 }
                 break;
 
-            // Screen 4: Track & Dynamics (FAFO) -> Calibrated Throttle %, RPM, Load %
+            // Screen 4: Track & Dynamics (FAFO) -> Fast Speed (20Hz for 0-60 timer), Throttle %, RPM, Load %
             case 4:
-                switch (i.slowIdx % 3) {
-                    case 0:
-                        if (readUint8(i, "0111", "11", b)) {
-                            uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
-                            uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
-                            if (eff > 100) eff = 100;
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.throttlePct = eff;
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                    case 1:
-                        if (readUint16(i, "010C", "0C", tmp)) {
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.rpm = tmp / 4;
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                    case 2:
-                        if (readUint8(i, "0104", "04", b)) {
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
+                if ((i.slowIdx % 2) == 0) {
+                    // Even tick: High-rate Speed for precise 0-60 trigger/trap timing
+                    if (readUint8(i, "010D", "0D", b)) {
+                        portENTER_CRITICAL(&i.mux);
+                        i.data.speedKmh = b;
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                } else {
+                    // Odd tick: Dynamics metrics
+                    switch ((i.slowIdx / 2) % 3) {
+                        case 0:
+                            if (readUint8(i, "0111", "11", b)) {
+                                uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
+                                uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
+                                if (eff > 100) eff = 100;
+                                portENTER_CRITICAL(&i.mux);
+                                i.data.throttlePct = eff;
+                                portEXIT_CRITICAL(&i.mux);
+                            }
+                            break;
+                        case 1:
+                            if (readUint16(i, "010C", "0C", tmp)) {
+                                portENTER_CRITICAL(&i.mux);
+                                i.data.rpm = tmp / 4;
+                                portEXIT_CRITICAL(&i.mux);
+                            }
+                            break;
+                        case 2:
+                            if (readUint8(i, "0104", "04", b)) {
+                                portENTER_CRITICAL(&i.mux);
+                                i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                                portEXIT_CRITICAL(&i.mux);
+                            }
+                            break;
+                    }
                 }
                 break;
 
-            // Screen 5: Engine Tachometer -> Fast RPM, Load %, Calibrated Throttle %
+            // Screen 5: Engine Tachometer -> High-Rate RPM (20Hz), Engine Load %, Calibrated Throttle %
             case 5:
-                switch (i.slowIdx % 3) {
-                    case 0:
-                        if (readUint16(i, "010C", "0C", tmp)) {
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.rpm = tmp / 4;
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                    case 1:
-                        if (readUint8(i, "0104", "04", b)) {
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
-                    case 2:
-                        if (readUint8(i, "0111", "11", b)) {
-                            uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
-                            uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
-                            if (eff > 100) eff = 100;
-                            portENTER_CRITICAL(&i.mux);
-                            i.data.throttlePct = eff;
-                            portEXIT_CRITICAL(&i.mux);
-                        }
-                        break;
+                if ((i.slowIdx % 2) == 0) {
+                    // Even tick: Fast RPM needle response
+                    if (readUint16(i, "010C", "0C", tmp)) {
+                        portENTER_CRITICAL(&i.mux);
+                        i.data.rpm = tmp / 4;
+                        portEXIT_CRITICAL(&i.mux);
+                    }
+                } else {
+                    // Odd tick: Load & Throttle
+                    switch ((i.slowIdx / 2) % 2) {
+                        case 0:
+                            if (readUint8(i, "0104", "04", b)) {
+                                portENTER_CRITICAL(&i.mux);
+                                i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                                portEXIT_CRITICAL(&i.mux);
+                            }
+                            break;
+                        case 1:
+                            if (readUint8(i, "0111", "11", b)) {
+                                uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
+                                uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
+                                if (eff > 100) eff = 100;
+                                portENTER_CRITICAL(&i.mux);
+                                i.data.throttlePct = eff;
+                                portEXIT_CRITICAL(&i.mux);
+                            }
+                            break;
+                    }
                 }
                 break;
 
@@ -761,27 +969,25 @@ void ObdService::pollTpms(Impl& i, uint32_t now) {
         }
     }
 
-    // Query PRND Selector Position DID 222A27 while on Header 720
-    if (i.elm.sendQuery("222A27", resp, sizeof(resp), 250)) {
-        uint8_t ob[1];
-        if (parseMode22Bytes(resp, "2A27", ob, 1)) {
-            char prnd = '-';
-            switch (ob[0]) {
-                case 1: prnd = 'P'; break;
-                case 2: prnd = 'R'; break;
-                case 3: prnd = 'N'; break;
-                case 4: prnd = 'D'; break;
-                case 5: prnd = 'M'; break;
-                default: prnd = '-'; break;
-            }
-            portENTER_CRITICAL(&i.mux);
-            i.data.tcmPrnd = prnd;
-            portEXIT_CRITICAL(&i.mux);
-        }
-    }
-
-    // Restore PCM header 7E0
+    // Restore PCM header 7E0 from Header 720
     i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+
+    // Query PRND & Direct Gear from TCM Header 7E1 (DID 221E12) (Automatic Only)
+    if (i.data.isAutomatic) {
+        i.elm.sendQuery("ATSH 7E1", resp, sizeof(resp), 150);
+        if (i.elm.sendQuery("221E12", resp, sizeof(resp), 250)) {
+            uint8_t ob[1];
+            if (parseMode22Bytes(resp, "1E12", ob, 1)) {
+                char prnd = '-', directGear = '-';
+                decodeTcmGear(ob[0], prnd, directGear);
+                portENTER_CRITICAL(&i.mux);
+                i.data.tcmPrnd = prnd;
+                i.tcmDirectGear = directGear;
+                portEXIT_CRITICAL(&i.mux);
+            }
+        }
+        i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+    }
 
     // Query Ambient Air Temp (Mode 01 PID 46 on PCM 7E0)
     uint8_t amb = 0;
