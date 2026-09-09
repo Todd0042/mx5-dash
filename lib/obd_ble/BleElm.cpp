@@ -25,6 +25,10 @@ static bool isVLinkerName(const char* name) {
 
 RingbufHandle_t BleElm::ringBuf_ = nullptr;
 
+// The one BleElm instance currently running an async scan; onScanCompleteStatic
+// routes the NimBLE completion callback back to it.
+static BleElm* g_activeScanOwner = nullptr;
+
 // ---------------------------------------------------------------------------
 // Callbacks
 // ---------------------------------------------------------------------------
@@ -63,13 +67,44 @@ public:
         std::string mac = advertisedDevice->getAddress().toString();
         int rssi = advertisedDevice->getRSSI();
 
+        // TEMP DIAGNOSTIC: log every advertisement the radio actually sees so
+        // we can tell "vLinker not advertising" apart from "filter dropped it".
+        Serial.printf("[bleElm] RX adv: '%s' %s rssi=%d svc_cnt=%u\n",
+                      name.empty() ? "(no name)" : name.c_str(), mac.c_str(),
+                      rssi, (unsigned)advertisedDevice->getServiceUUIDCount());
+        for (uint8_t k = 0; k < advertisedDevice->getServiceUUIDCount(); k++) {
+            Serial.printf("[bleElm]   svc[%u] = %s\n", k,
+                          advertisedDevice->getServiceUUID(k).toString().c_str());
+        }
+        {
+            std::string manu = advertisedDevice->getManufacturerData();
+            char manuHex[32];
+            manuHex[0] = '\0';
+            for (size_t k = 0; k < manu.size() && k < 12; k++) {
+                size_t pos = strlen(manuHex);
+                snprintf(manuHex + pos, sizeof(manuHex) - pos, "%02X", (uint8_t)manu[k]);
+            }
+            int need = snprintf(nullptr, 0, "%s|%s|%ddBm|manu=%s ", name.empty() ? "(unnamed)" : name.c_str(),
+                                mac.c_str(), rssi, manuHex);
+            if ((int)owner_->diagLen_ + need < (int)sizeof(owner_->diagBuf_) - 1) {
+                owner_->diagLen_ += (size_t)snprintf(owner_->diagBuf_ + owner_->diagLen_,
+                                                     sizeof(owner_->diagBuf_) - owner_->diagLen_,
+                                                     "%s|%s|%ddBm|manu=%s ", name.empty() ? "(unnamed)" : name.c_str(),
+                                                     mac.c_str(), rssi, manuHex);
+            }
+        }
+        owner_->diagCount_++;
+
         // Only surface vLinker adapters (or the explicitly paired adapter) in
         // scan results. vLinker units advertise under many spellings, and some
-        // only broadcast the service UUID without a name — accept both.
+        // never broadcast a name at all (iOS manual) - they rely on the GATT
+        // service UUID instead. Accept the standard OBD UUIDs plus Vgate's
+        // proprietary 128-bit serial service so those units are listed too.
         bool isVLinker   = isVLinkerName(name.c_str());
         bool isObdUuid   = (advertisedDevice->isAdvertisingService(NimBLEUUID("FFF0")) ||
                             advertisedDevice->isAdvertisingService(NimBLEUUID("FFE0")) ||
-                            advertisedDevice->isAdvertisingService(NimBLEUUID("18F0")));
+                            advertisedDevice->isAdvertisingService(NimBLEUUID("18F0")) ||
+                            advertisedDevice->isAdvertisingService(NimBLEUUID("e7810a71-73ae-499d-8c15-faa9aef0c3f2")));
         bool isPairedMac = (strlen(owner_->pairedMac_) > 0 &&
                             strcasecmp(owner_->pairedMac_, mac.c_str()) == 0);
         if (!isVLinker && !isObdUuid && !isPairedMac) return;
@@ -122,31 +157,80 @@ bool BleElm::begin(const char* targetNamePrefix) {
         ringBuf_ = xRingbufferCreate(1024, RINGBUF_TYPE_BYTEBUF);
     }
 
+    // Persistent scan callback, created exactly once and reused across scans.
+    // This avoids the NimBLE 1.4.x hazard of swapping callback objects while a
+    // discovery window is in flight (which can silently kill result delivery).
+    if (!scanCbs_) {
+        scanCbs_ = new BleElmScanCallbacks(this, &targetDevice_);
+    }
+
+    Serial.printf("[bleElm] begin step0 core=%d\n", xPortGetCoreID());
     NimBLEDevice::init("MX5-Dash");
+    Serial.printf("[bleElm] begin step1 init-ok\n");
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);   // Max TX power for car cabin range
     NimBLEDevice::setSecurityAuth(true, true, true);
     NimBLEDevice::setMTU(512);
+    Serial.printf("[bleElm] begin step2 config-ok\n");
 
-    Serial.printf("[bleElm] initialized BLE subsystem (paired MAC: '%s', prefix: '%s')\n",
-                  pairedMac_, namePrefix_);
+    Serial.printf("[bleElm] initialized BLE subsystem (this=%p, paired MAC: '%s', prefix: '%s')\n",
+                  this, pairedMac_, namePrefix_);
+    initReady_ = true;
     return true;
 }
 
 void BleElm::startScan(uint32_t durationSec) {
-    discoveredCount_ = 0;
-    scanning_ = true;
-    NimBLEScan* pScan = NimBLEDevice::getScan();
-    pScan->setAdvertisedDeviceCallbacks(new BleElmScanCallbacks(this, &targetDevice_), true);
-    pScan->setActiveScan(true);
-    pScan->setInterval(97);
-    pScan->setWindow(67);
-    pScan->start(durationSec, false);
-    scanning_ = false;
+    if (scanning_) return;              // never stack/restart an active scan
+    discoveredCount_ = 0;               // fresh list for a user-initiated scan
+    diagBuf_[0] = '\0';                 // TEMP DIAGNOSTIC reset
+    diagLen_ = 0;
+    diagCount_ = 0;
+    startScanInternal(durationSec);
 }
 
 void BleElm::stopScan() {
-    NimBLEDevice::getScan()->stop();
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    if (pScan->isScanning()) {
+        pScan->stop();
+    }
     scanning_ = false;
+    lastScanEndMs_ = millis();
+}
+
+bool BleElm::startScanInternal(uint32_t durationSec) {
+    if (scanning_) return false;
+    if (!scanCbs_) return false;
+
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    pScan->setAdvertisedDeviceCallbacks(scanCbs_, false);
+    pScan->setActiveScan(true);
+    pScan->setInterval(97);
+    pScan->setWindow(67);
+
+    scanning_ = true;
+    lastScanStartMs_ = millis();
+    g_activeScanOwner = this;
+
+    // Async start. The completion callback only fires when the discovery window
+    // really ends (duration elapsed or stop()), so loop() can pace the next scan
+    // from actual completion instead of assumption. Restarting an active scan
+    // returns BLE_HS_EALREADY (still true) but does NOT restart anything - the
+    // old pacing used just this and let discovery silently die.
+    if (!pScan->start(durationSec, &BleElm::onScanCompleteStatic, false)) {
+        scanning_ = false;
+        lastScanEndMs_ = millis();
+        g_activeScanOwner = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void BleElm::onScanCompleteStatic(NimBLEScanResults results) {
+    (void)results;
+    if (g_activeScanOwner) {
+        g_activeScanOwner->scanning_ = false;
+        g_activeScanOwner->lastScanEndMs_ = millis();
+        g_activeScanOwner = nullptr;
+    }
 }
 
 bool BleElm::getDiscoveredDevice(uint8_t index, BleDeviceInfo& out) const {
@@ -197,7 +281,18 @@ void BleElm::getPairedDevice(char* macBuf, size_t macLen, char* nameBuf, size_t 
 }
 
 void BleElm::loop() {
+    if (!initReady_) return;               // begin() not finished yet
     uint32_t now = millis();
+
+    // TEMP DIAGNOSTIC: explain why auto-scan is not starting
+    static uint32_t s_lastProbe = 0;
+    if (now - s_lastProbe >= 10000) {
+        s_lastProbe = now;
+        Serial.printf("[bleElm] probe: conn=%d init=%d scan=%d target=%d now=%lu end=%lu retry=%lu dt=%lu\n",
+                      connected_, initialized_, scanning_, (targetDevice_ != nullptr),
+                      (unsigned long)now, (unsigned long)lastScanEndMs_, (unsigned long)retryDelayMs_,
+                      (unsigned long)(now - lastScanEndMs_));
+    }
 
     // 1) Handle disconnected state -> trigger scan or reconnect
     if (!connected_) {
@@ -206,27 +301,34 @@ void BleElm::loop() {
         }
         initialized_ = false;
 
-        // Start scanning if we don't have a target device yet
-        if (!targetDevice_) {
-            if (!scanning_ && (now - lastScanMs_ >= retryDelayMs_)) {
-                lastScanMs_ = now;
-                scanning_ = true;
-                Serial.printf("[bleElm] starting BLE scan (paired MAC: '%s', prefix: '%s')...\n", pairedMac_, namePrefix_);
+        // Safety net: if a scan was started but its completion callback never
+        // ran (e.g. host stack hiccup), force it closed so pacing can continue.
+        if (scanning_ && (now - lastScanStartMs_ > 6000)) {
+            stopScan();
+        }
 
-                NimBLEScan* pScan = NimBLEDevice::getScan();
-                pScan->setAdvertisedDeviceCallbacks(new BleElmScanCallbacks(this, &targetDevice_), true);
-                pScan->setActiveScan(true);
-                pScan->setInterval(97);
-                pScan->setWindow(67);
-                pScan->start(5, false);   // scan for 5 seconds
-                scanning_ = false;
+        // Start a new scan only when none is active AND the quiet period since
+        // the previous scan actually ENDED has elapsed. Scanning for 5s, then
+        // idling retryDelayMs_, gives every advertiser plenty of windows.
+        if (!targetDevice_) {
+            if (!scanning_ && (now - lastScanEndMs_ >= retryDelayMs_)) {
+                Serial.printf("[bleElm] starting BLE scan (paired MAC: '%s', prefix: '%s')...\n", pairedMac_, namePrefix_);
+                if (!startScanInternal(5)) {
+                    // Stack not synced yet etc.: back off briefly and retry.
+                    lastScanEndMs_ = now - retryDelayMs_ + 500;
+                }
             }
             return;
         }
 
+        // Never try to connect while a discovery window is still running.
+        if (scanning_) {
+            stopScan();
+        }
+
         // We have a target device: attempt connection
-        if (now - lastScanMs_ >= 1000) {
-            lastScanMs_ = now;
+        if (now - lastConnectAttemptMs_ >= 1000) {
+            lastConnectAttemptMs_ = now;
             if (connectToDevice()) {
                 if (discoverGatt() && initAdapter()) {
                     connected_ = true;
@@ -395,6 +497,8 @@ bool BleElm::initAdapter() {
 }
 
 void BleElm::teardown() {
+    stopScan();   // never leave the controller mid-discovery while tearing down
+
     if (pNotifyChar_) {
         pNotifyChar_->unsubscribe();
         pNotifyChar_ = nullptr;

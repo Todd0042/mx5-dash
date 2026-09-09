@@ -58,8 +58,18 @@ struct ObdService::Impl {
 void ObdService::start() {
     Impl* p = new Impl();
     impl_ = p;
+
+    // Create the task BEFORE NimBLEDevice::init(): on ESP32-S3 the BLE stack
+    // carves ~50KB out of internal DRAM (heap drops ~57KB -> ~7KB), leaving no
+    // contiguous 8KB+TCB block for the task, so creation was failing with pdFAIL.
+    BaseType_t rc = xTaskCreatePinnedToCore(taskMain, "obd", 8192, this, 2, &p->task, 0);
+    Serial.printf("[bleElm] xTaskCreate -> %d (pdPASS=%d) stack/prio 8192/2 on core 0\n",
+                  (int)rc, (int)pdPASS);
+
     p->elm.begin(MX5_BLE_DEVICE_PREFIX);
-    xTaskCreatePinnedToCore(taskMain, "obd", 8192, this, 1, &p->task, 0);
+    Serial.printf("[bleElm] heap after BLE init: int=%u dma=%u\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
 }
 
 void ObdService::taskMain(void* arg) {
@@ -123,8 +133,19 @@ static void decodeTcmGear(uint8_t b, char& prnd, char& directGear) {
 void ObdService::loopTask() {
     Impl* p = impl_;
     bool wasConnected = false;
+    Serial.printf("[bleElm] OBD task entered on core %d\n", xPortGetCoreID());
+    uint32_t s_tickCounter = 0;
     for (;;) {
+        implTickMs_ = millis();
+        s_tickCounter++;
+        if ((s_tickCounter & 0x3FF) == 0) {          // ~every 5s at 5ms tick
+            Serial.printf("[bleElm] task tick %lu conn=%d init=%d scan=%d img=%p elm=%p implRdy=%d\n",
+                          (unsigned long)s_tickCounter,
+                          p->elm.isConnected(), p->elm.isInitialized(), p->elm.isScanning(),
+                          (void*)impl_, (void*)&p->elm, p->elm.initReady());
+        }
         p->elm.loop();                     // keep BLE + ELM handshake healthy
+
         bool isInit = p->elm.isInitialized();
         if (isInit && !wasConnected) {
             // New connection established: Probe TCM (Header 7E1) to auto-detect 6AT vs 6MT
@@ -927,6 +948,18 @@ uint8_t ObdService::getDiscoveredDeviceCount() const {
 
 bool ObdService::getDiscoveredDevice(uint8_t index, BleDeviceInfo& out) const {
     return impl_ ? impl_->elm.getDiscoveredDevice(index, out) : false;
+}
+
+const char* ObdService::diagBuffer() const {
+    return impl_ ? impl_->elm.diagBuffer() : "";
+}
+
+size_t ObdService::diagCount() const {
+    return impl_ ? impl_->elm.diagCount() : 0;
+}
+
+uint32_t ObdService::core0TickAgeMs() const {
+    return implTickMs_ ? millis() - (uint32_t)implTickMs_ : 0xFFFFFFFF;
 }
 
 void ObdService::pairDevice(const char* mac, const char* name) {

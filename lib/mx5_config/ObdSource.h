@@ -58,6 +58,14 @@ public:
         if (nameBuf && nameLen > 0) nameBuf[0] = '\0';
     }
 
+    // TEMP DIAGNOSTIC: everything the radio saw during the last scan window.
+    virtual const char* diagBuffer() const { return ""; }
+    virtual size_t      diagCount() const  { return 0; }
+
+    // TEMP DIAGNOSTIC: age (ms) of the core-0 BLE/ELM loop task's last tick.
+    // 0xFFFFFFFF means it never ticked. Lets core-1 UI prove core-0 liveness.
+    virtual uint32_t core0TickAgeMs() const { return 0xFFFFFFFF; }
+
     // --- Setup wizard / TPMS calibration --------------------------------------
     virtual void freeze(bool frozen) { (void)frozen; }
     virtual void startCalibration(uint8_t activeWheel)        { (void)activeWheel; }

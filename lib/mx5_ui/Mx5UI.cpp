@@ -3894,6 +3894,14 @@ lv_obj_t* Mx5UI::buildBleConfigScreen() {
 }
 
 void Mx5UI::updateBleConfigScreen() {
+#if defined(ARDUINO)
+    // TEMP DIAGNOSTIC: report core-0 BLE/ELM loop liveness every 2s.
+    static uint32_t s_lastAgePrint = 0;
+    if (millis() - s_lastAgePrint >= 2000) {
+        s_lastAgePrint = millis();
+        Serial.printf("[bleElm] core0 loop tick age = %lums\n", (unsigned long)obd_.core0TickAgeMs());
+    }
+#endif
     char pairedMac[20] = "";
     char pairedName[32] = "";
     obd_.getPairedDevice(pairedMac, sizeof(pairedMac), pairedName, sizeof(pairedName));
@@ -3943,6 +3951,24 @@ void Mx5UI::updateBleConfigScreen() {
                 lv_obj_set_style_border_color(bleDeviceSlot_[i], dev.isPaired ? C_ACCENT : C_PANEL_BRD, 0);
                 lv_obj_set_style_border_width(bleDeviceSlot_[i], dev.isPaired ? 2 : 1, 0);
             }
+        }
+    }
+
+    // Drop the "Scanning..." banner once the discovery window actually ends.
+    if (bleScanBusy_ && !obd_.isScanning()) {
+        bleScanBusy_ = false;
+
+        // TEMP DIAGNOSTIC: dump everything the radio received during this scan.
+#if defined(ARDUINO)
+        Serial.printf("[bleElm] UI scan done: %u device(s), core0 tick age = %lums:\n",
+                      (unsigned)obd_.diagCount(), (unsigned long)obd_.core0TickAgeMs());
+        Serial.printf("[bleElm]   %s\n", obd_.diagBuffer());
+#endif
+
+        if (bleScanStatusLbl_) {
+            lv_label_set_text_fmt(bleScanStatusLbl_, "Scan finished - %u device%s found. Tap to pair:",
+                                  (unsigned)count, count == 1 ? "" : "s");
+            lv_obj_set_style_text_color(bleScanStatusLbl_, C_CHROME, 0);
         }
     }
 }
@@ -4019,6 +4045,7 @@ void Mx5UI::onBleActionClick(lv_event_t* e) {
         ui->updateBleConfigScreen();
     } else if (action == 403) { // Rescan
         ui->obd_.startBleScan();
+        ui->bleScanBusy_ = true;
         if (ui->bleScanStatusLbl_) {
             lv_label_set_text(ui->bleScanStatusLbl_, "Scanning nearby BLE devices...");
             lv_obj_set_style_text_color(ui->bleScanStatusLbl_, C_ACCENT, 0);

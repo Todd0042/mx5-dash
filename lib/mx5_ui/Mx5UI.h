@@ -363,6 +363,7 @@ private:
     lv_obj_t* bleDevMacLbl_[4] = {};
     lv_obj_t* bleDevTagLbl_[4] = {};
     uint8_t selectedBleDevice_ = 0;
+    bool bleScanBusy_ = false;   // true while "Scanning..." text is shown
 
     lv_obj_t* screens_[SCREEN_COUNT] = {};
     uint8_t currentScreen_ = 0;

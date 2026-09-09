@@ -13,11 +13,100 @@ see `GEMINI.md`.
   FT6336 capacitive touch, AXP2101 PMIC, TCA9554 port expander, BMA421 IMU).
   This is the sibling of the 3.5" **"B"** (AXS15231B QSPI + AXS5106L touch).
 - **Car**: 2022 Mazda MX-5 RF GT (ND2 / SkyActiv-G).
-- **BLE OBD adapter**: vLinker (LE version). It is currently **unpaired from the
-  PC** so it will advertise and the dash can discover it. Do not pair it to a
-  phone/PC while testing the dash, otherwise it stops advertising.
+- **BLE OBD adapter**: **vLinker MC+** (Vgate), plugged into the OBD port of the
+  **running** car. Android Bluetooth settings shows its name as **"vLinker MS
+  08449"**. Vgate units only advertise while **unpaired/unbound**; once a phone
+  has bonded them they withhold advertisements from all other scanners. See the
+  BLE session notes below — this bond is the leading theory for why our radios
+  have never caught it.
 - The "3.5-C" variant was added as a firmware-supported sibling of the existing
   "3.5-B" build (auto-detected by I2C probing for 0x3B vs 0x38 touch IC).
+
+--- 
+
+## BLE Discovery Session (2026-09-08) — Two Core Bugs Found & Fixed
+
+### Bug 1 — the core-0 OBD task silently never ran ("auto-scan death")
+- `ObdService` spins up a FreeRTOS task on **core 0** (prio 2, 8 KB stack) that
+  drives all background BLE scanning / reconnect. It used to be created **after**
+  `NimBLEDevice::init()` in `ObdService::start()`.
+- On the ESP32-S3 the display/LVGL init (`ui.begin()`) consumes ~250 KB of
+  internal RAM. Measured free internal RAM right before BLE init: **~57 KB**;
+  after `NimBLEDevice::init()`: **7,180 B**.
+- `xTaskCreatePinnedToCore` therefore returned **pdFAIL (-1)** — no room for the
+  8 KB stack + TCB — and the task **never ran**. UI-triggered rescans still
+  worked (they call the NimBLE scan API directly), so the failure was invisible:
+  symptoms were "can't find / never connects" when the real problem was "no
+  background scanner exists at all".
+
+### Bug 2 — Naive "task first" fix made `NimBLEDevice::init()` hang
+- Reordering so the task ran first caused `NimBLEDevice::init()` to **hang
+  forever**: the 8 KB task had already consumed the heap NimBLE needs for its own
+  host task/buffers → deadlock. Verified with step prints: `begin step0 core=1`
+  printed, `begin step1 init-ok` never did, while the task stayed alive and
+  ticking the whole time.
+
+### The real fix — start OBD before the display (main.cpp `setup()`)
+- Internal RAM at setup start is **~310 KB** (measured: `int=309964 dma=302180`)
+  because nothing has initialized the UI yet. So `main.cpp` now does:
+  `UserPrefs::loadAll()` → `obd.setBlePrefix()/setBleScanTimeout()` →
+  `obd.start()` → `display.begin()` → `ui.begin()`. BLE + 8 KB task both fit
+  trivially in the pre-UI heap.
+- `BleElm::loop()` is gated on a `volatile bool initReady_` set at the end of
+  `begin()`, so the task never touches NimBLE before init completes.
+- Verified post-fix boot chain:
+  ```
+  [main] heap at setup start: int=309964 dma=302180
+  [bleElm] xTaskCreate -> 1 (pdPASS=1) stack/prio 8192/2 on core 0
+  [bleElm] begin step0 core=1 / step1 init-ok / step2 config-ok
+  [bleElm] initialized BLE subsystem (paired MAC: '', prefix: 'vLinker')
+  [bleElm] starting BLE scan ...        <- auto-scan now runs continuously
+  [bleElm] probe: conn=0 init=0 scan=1 ... implRdy=1
+  [bleElm] UI scan done: N device(s), core0 tick age = 12-19ms
+  ```
+  Cross-core loop health is reported as `core0 tick age` (3–19 ms) on the BT
+  screen and in the scan-done dump.
+
+### vLinker MC+ discovery status (UNRESOLVED — user action pending)
+- Adapter: **vLinker MC+**, in a **running** car on 12 V. Blue LED flashes
+  rapidly while its pairing/advertising window is open (normal).
+- Android Bluetooth settings shows the name **"vLinker MS 08449"** — our
+  `isVLinkerName()` filter already matches that name, so the board will list it
+  the moment it actually advertises.
+- **Our radios have NEVER received a single vLinker packet** across many
+  captures: 60–75 s laptop (bleak) scans, a guaranteed-aligned 40 s capture
+  covering 5 consecutive board scan windows, all in the car cabin next to the
+  adapter. Both radios reliably decode every *other* device in the cabin (Apple
+  004C, 0xfcf1 Google-ish, 0xfeaf trackers `N1GBU`/`NKER5`, ResMed 434468, …
+  — see `/tmp/blescan_laptop*.log`, `/tmp/blescan_board*.log`), so the radios are
+  not the problem.
+- Leading theory: the phone listing is **bond cache**. The MC+ holds a bond from
+  an earlier phone session; like all Vgate units it then **withholds its
+  advertisement from every other scanner**. Forgetting it on the phone only
+  clears the phone side — the **adapter side** must be unbound (long-press the
+  button until the LED changes pattern, per the MC+ manual).
+- **Pending user action:** after *Forget*, press the adapter button and check
+  whether "vLinker MS 08449" re-appears under **Available devices** (live
+  advertisement) or only under **Previously paired** (bond memory). If it is
+  still bound, long-press the MC+ button to unbind it, then re-press to open a
+  fresh pairing window.
+- Once it advertises, the board filter is ready: `isVLinkerName()`, the vLinker
+  128-bit UUID `e7810a71-73ae-499d-8c15-faa9aef0c3f2`, and OBD UUIDs
+  `FFF0`/`FFE0`/`18F0` all remain in `BleElm.cpp`.
+
+### TEMP diagnostic instrumentation still in place (remove after first connect)
+- `BleElm.cpp`: `begin()` step prints, `loop()` probe print, RX advertising dump
+  in `onResult` (`[bleElm] RX adv: ...`), `diagBuffer_/diagLen_/diagCount_`.
+- `ObdService.cpp/.h`: task-entered + 5 s tick prints, xTaskCreate/heap prints,
+  `volatile uint32_t implTickMs_`, `diagBuffer()/diagCount()/core0TickAgeMs()`
+  overrides.
+- `ObdSource.h` (lib/mx5_config): diagnostic virtuals so the native build
+  compiles.
+- `Mx5UI.cpp`: scan-done diag dump + 2 s core0-age print on the BT screen
+  (all `#if defined(ARDUINO)`-guarded).
+- `main.cpp`: `heap at setup start` print.
+
+---
 
 ## Where We Left Off / Current Status
 
@@ -69,6 +158,11 @@ board**, and is committed to GitHub:
 7. **Android side**: continued in lockstep (AndroidMx5UI.cpp overhaul,
    BluetoothSerialManager.kt rework, MainActivity + Mx5RenderView tweaks). It is
    **not** the current focus — hardware test phase is.
+8. **BLE driver fixed**: the core-0 background scan task now actually runs
+   (`obd.start()` moved before display init, see session notes above) — auto
+   scan, scan pacing, and result delivery are all live on the board. The only
+   open piece is the **vLinker MC+ not advertising to us** (bond-cache theory,
+   see above).
 
 ## Verified Boot Log (last 3.5-C flash, sanity reference)
 
@@ -85,6 +179,10 @@ board**, and is committed to GitHub:
 
 ## Next Steps (in-vehicle, in order)
 
+0. **Unbind the MC+ from the phone so it advertises again.** Per the session
+   notes: verify whether "vLinker MS 08449" is live or bond-cache, long-press
+   the MC+ button to unbind if needed, then re-press for a fresh pairing window.
+   Only then will the board's auto-scan (and laptop bleak) see it.
 1. **Run the setup wizard** (board is at `configured=0`).
    - Pair the vLinker (BLE MAC shown in the discovery list during the wizard).
    - Confirm USB Left orientation is correct on boot; if it comes up "USB right"
@@ -139,8 +237,16 @@ board**, and is committed to GitHub:
 
 ## Recurring Gotchas
 
-- **vLinker advertising**: only advertises while unconnected. If the dash
-  "finds nothing", check whether any other device/phone holds the BLE link.
+- **vLinker advertising**: only advertises while **unpaired/unbound** — once any
+  phone bonded it, it hides from all other scanners. If the dash "finds nothing"
+  while the phone still lists it under *Paired devices*, the phone listing is
+  **bond cache**, not a live advertisement; unbind the **adapter** (long-press
+  its button) and then test with fresh pairing.
+- **ESP32-S3 heap under NimBLE**: `NimBLEDevice::init()` eats ~50 KB of internal
+  RAM, and display/LVGL init eats ~250 KB **before** that. On this board you get
+  exactly one shot — start BLE and its 8 KB core-0 task **before** `ui.begin()`,
+  or either the task creation returns `pdFAIL` or BLE init hangs. Keep the
+  pre-UI ~310 KB window for all of it.
 - **Old "B" model paths still exist** (`Arduino_AXS15231B` driver files were
   deleted in favor of vendored Arduino_GFX which provides it). The 3.5B env
   still builds; if the B panel was re-introduced, re-verify the QSPI R1 flush

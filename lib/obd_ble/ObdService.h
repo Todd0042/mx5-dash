@@ -59,6 +59,12 @@ public:
     void pairDevice(const char* mac, const char* name) override;
     void forgetPairedDevice() override;
     void getPairedDevice(char* macBuf, size_t macLen, char* nameBuf, size_t nameLen) const override;
+    const char* diagBuffer() const override;
+    size_t diagCount() const override;
+    uint32_t core0TickAgeMs() const override;
+
+    // TEMP DIAGNOSTIC: bumped every loopTask iteration; read from core 1.
+    volatile uint32_t implTickMs_ = 0;
 
     // --- Setup wizard / TPMS calibration --------------------------------------
     void freeze(bool frozen) override;

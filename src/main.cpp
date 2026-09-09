@@ -26,13 +26,29 @@ static ObdService obd;
 static Mx5UI ui(obd);
 
 void setup() {
+    // TEMP DIAGNOSTIC: how much internal RAM exists before anything runs?
     Serial.begin(115200);
+    Serial.printf("[main] heap at setup start: int=%u dma=%u\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
     delay(200);
 
     Serial.println("[main] booting...");
 
     // Load all user preferences from NVS flash (falls back to Config.h defaults)
     UserPrefs::loadAll();
+
+    // OBD service: spins up its own task on core 0.
+    // Started BEFORE display/LVGL init: on ESP32-S3 the UI buffers consume
+    // ~250KB of internal RAM, shrinking the heap so far that NimBLE init plus
+    // the 8KB OBD task stack can no longer coexist (task creation returned
+    // pdFAIL / NimBLEDevice::init() would hang). Starting early keeps ~310KB
+    // free so BLE + task both fit comfortably.
+    char blePrefix[32];
+    UserPrefs::getBlePrefix(blePrefix, sizeof(blePrefix));
+    obd.setBlePrefix(blePrefix);
+    obd.setBleScanTimeout(UserPrefs::getBleScanTimeout());
+    obd.start();
 
     // Display + touch + LVGL live entirely on core 1 (this core).
     if (!display.begin()) {
@@ -56,14 +72,6 @@ void setup() {
 
     uint8_t savedBri = UserPrefs::getBrightness();
     ui.setBrightness(savedBri);
-
-    // OBD service: spins up its own task on core 0.
-    // Apply saved BLE prefix before starting scan
-    char blePrefix[32];
-    UserPrefs::getBlePrefix(blePrefix, sizeof(blePrefix));
-    obd.setBlePrefix(blePrefix);
-    obd.setBleScanTimeout(UserPrefs::getBleScanTimeout());
-    obd.start();
 
     // First-time boot: run the 4-step setup wizard before the driving dashboard.
     if (!UserPrefs::isConfigured()) {
