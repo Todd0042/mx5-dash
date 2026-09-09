@@ -92,13 +92,14 @@ public:
                 size_t pos = strlen(manuHex);
                 snprintf(manuHex + pos, sizeof(manuHex) - pos, "%02X", (uint8_t)manu[k]);
             }
-            int need = snprintf(nullptr, 0, "%s|%s|%ddBm|manu=%s ", name.empty() ? "(unnamed)" : name.c_str(),
-                                mac.c_str(), rssi, manuHex);
-            if ((int)owner_->diagLen_ + need < (int)sizeof(owner_->diagBuf_) - 1) {
-                owner_->diagLen_ += (size_t)snprintf(owner_->diagBuf_ + owner_->diagLen_,
-                                                     sizeof(owner_->diagBuf_) - owner_->diagLen_,
-                                                     "%s|%s|%ddBm|manu=%s ", name.empty() ? "(unnamed)" : name.c_str(),
-                                                     mac.c_str(), rssi, manuHex);
+            if (owner_->diagLen_ + 1 < sizeof(owner_->diagBuf_)) {
+                int avail = (int)(sizeof(owner_->diagBuf_) - owner_->diagLen_);
+                int w = snprintf(owner_->diagBuf_ + owner_->diagLen_, avail,
+                                 "%s|%s|%ddBm|manu=%s ", name.empty() ? "(unnamed)" : name.c_str(),
+                                 mac.c_str(), rssi, manuHex);
+                if (w > 0) {
+                    owner_->diagLen_ += (size_t)(w < avail ? w : (avail - 1));
+                }
             }
         }
         owner_->diagCount_++;
