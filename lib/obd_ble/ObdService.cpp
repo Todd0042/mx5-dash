@@ -42,6 +42,13 @@ struct ObdService::Impl {
     char     tcmDirectGear = '-';
     volatile uint8_t activeScreen_ = 0;
 
+    // Fuel level rolling 30s window (suppresses tank slosh while braking/cornering)
+    static const uint8_t kFuelRingCap = 16;
+    uint8_t  fuelSamples[kFuelRingCap];
+    uint32_t fuelSampleTs[kFuelRingCap];
+    uint8_t  fuelRingHead = 0;
+    uint8_t  fuelRingCount = 0;
+
     // Setup wizard / calibration state (updated under mux)
     volatile bool frozen_ = false;            // task suspended (wizard up)
     volatile bool calibrating_ = false;       // wheel-mapping in progress
@@ -85,7 +92,7 @@ static char estimateGear(uint16_t rpm, uint8_t speedKmh, bool isAuto, char tcmPr
         if (tcmPrnd == 'P' || tcmDirectGear == 'P') return 'P';
         if (tcmPrnd == 'N' || tcmDirectGear == 'N') return 'N';
         if (tcmDirectGear >= '1' && tcmDirectGear <= '6') return tcmDirectGear;
-        if (speedKmh < 2) return (rpm > 400) ? 'P' : '-';
+        if (speedKmh < 2) return (rpm > 400) ? tcmPrnd : '-';
 
         // SkyActiv-Drive RC6A-EL 6AT Physical Gear Ratios (2.866 Final Drive)
         float r = (float)rpm / (float)(speedKmh > 0 ? speedKmh : 1);
@@ -112,21 +119,29 @@ static char estimateGear(uint16_t rpm, uint8_t speedKmh, bool isAuto, char tcmPr
 static bool parseMode22Bytes(const char* resp, const char* didHex, uint8_t* out, uint8_t n);
 
 static void decodeTcmGear(uint8_t b, char& prnd, char& directGear) {
-    if (b == 0x60) {
-        prnd = 'R';
-        directGear = 'R';
-    } else if (b == 0x70) {
+    // ND 6AT TCM DID 221E12 byte (captured empirically on-road, 2026-09-09):
+    //   P = 0x46, R = 0x3C, N = 0x32, D in gear 1..6 = 0x01..0x06
+    if (b == 0x46) {
         prnd = 'P';
         directGear = 'P';
-    } else if (b == 0x50) {
+    } else if (b == 0x3C) {
+        prnd = 'R';
+        directGear = 'R';
+    } else if (b == 0x32) {
         prnd = 'N';
         directGear = 'N';
     } else if (b >= 1 && b <= 6) {
         prnd = 'D';
         directGear = (char)('0' + b);
-    } else if ((b & 0xF0) != 0 && (b & 0x0F) >= 1 && (b & 0x0F) <= 6) {
+    } else {
         prnd = 'D';
-        directGear = (char)('0' + (b & 0x0F));
+        directGear = '-';
+    }
+
+    static uint8_t s_lastTcmByte = 0xFF;
+    if (b != s_lastTcmByte) {
+        Serial.printf("[tcm] 221E12 raw=%02X -> prnd=%c directGear=%c\n", b, prnd, directGear);
+        s_lastTcmByte = b;
     }
 }
 
@@ -172,6 +187,10 @@ void ObdService::loopTask() {
 
         // Frozen (setup wizard on screen): stop normal PID polling, keep BLE up.
         if (p->frozen_) {
+            portENTER_CRITICAL(&p->mux);
+            p->data.connected = isInit;
+            p->data.lastUpdateMs = now;
+            portEXIT_CRITICAL(&p->mux);
             vTaskDelay(20 / portTICK_PERIOD_MS);
             continue;
         }
@@ -394,6 +413,62 @@ static inline uint8_t parseCalibratedFuel(uint8_t raw) {
     return (val > 100) ? 100 : (uint8_t)val;
 }
 
+// Fuel level with tank-slosh suppression, modeled on Mazda's damped gauge:
+// the needle is filtered with a long time constant so hard braking/cornering
+// slosh can't bounce it, but a refill still moves it up immediately.
+//   1) First sample -> shown straight through (initial value).
+//   2) Otherwise -> MEDIAN of every sample in the trailing 30s window. A median
+//      ignores isolated slosh spikes that a simple mean would still drag.
+//   3) Fast-fill detection: if the new raw is >=8 points above the window
+//      median the tank was just refilled -> reset the window and display it.
+// parseCalibratedFuel is linear, so median-of-raw == median-of-percentages.
+void ObdService::applyFuelSample(Impl& i, uint8_t raw) {
+    uint8_t idx = i.fuelRingHead;
+    i.fuelSamples[idx] = raw;
+    i.fuelSampleTs[idx] = millis();
+    i.fuelRingHead = (uint8_t)((idx + 1) % i.kFuelRingCap);
+    if (i.fuelRingCount < i.kFuelRingCap) i.fuelRingCount++;
+
+    if (i.fuelRingCount <= 1) {
+        portENTER_CRITICAL(&i.mux);
+        i.data.fuelLevelPct = parseCalibratedFuel(raw);
+        portEXIT_CRITICAL(&i.mux);
+        return;
+    }
+
+    uint32_t now = i.fuelSampleTs[idx];
+    uint8_t buf[i.kFuelRingCap];
+    uint8_t n = 0;
+    for (uint8_t k = 0; k < i.fuelRingCount; k++) {
+        if (now - i.fuelSampleTs[k] <= 30000UL && n < i.kFuelRingCap) {
+            buf[n++] = i.fuelSamples[k];
+        }
+    }
+    if (n < 1) n = 1;   // window fully expired - degenerate to this sample
+
+    // Simple insertion sort (window <= 16 samples; runs every few seconds)
+    for (uint8_t j = 1; j < n; j++) {
+        uint8_t v = buf[j];
+        int8_t k = (int8_t)j - 1;
+        while (k >= 0 && buf[k] > v) { buf[k + 1] = buf[k]; k--; }
+        buf[k + 1] = v;
+    }
+    uint8_t med = buf[n / 2];
+
+    // Refuel event: tank jumped well above the settled level - follow now
+    if (raw > med + 8) {
+        i.fuelRingHead = 0;
+        i.fuelSamples[0] = raw;
+        i.fuelSampleTs[0] = now;
+        i.fuelRingCount = 1;
+        med = raw;
+    }
+
+    portENTER_CRITICAL(&i.mux);
+    i.data.fuelLevelPct = parseCalibratedFuel(med);
+    portEXIT_CRITICAL(&i.mux);
+}
+
 // ---------------------------------------------------------------------------
 // PID polling - one per cadence expiry, sequenced so only one ELM command is
 // in flight at a time (the dongle is single-command, prompt-terminated).
@@ -469,71 +544,31 @@ void ObdService::executeNextBackgroundQuery(Impl& i, uint32_t now, uint8_t scree
                 }
             }
             break;
-        case 5: // TPMS FL (222A05 on BCM 720) - skip if on TPMS (1)
+        case 5: // TPMS FL (222A05 / 222A0A on BCM 720) - skip if on TPMS (1)
             if (screen != 1) {
                 i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
-                if (i.elm.sendQuery("222A05", resp, sizeof(resp), 300)) {
-                    uint8_t ob[2];
-                    if (parseMode22Bytes(resp, "2A05", ob, 2)) {
-                        portENTER_CRITICAL(&i.mux);
-                        float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
-                        i.data.tirePressure[0] = psi / 14.5038f;
-                        i.data.tireTemp[0] = (float)ob[1] - 40.0f;
-                        i.data.tireKnown[0] = true;
-                        portEXIT_CRITICAL(&i.mux);
-                    }
-                }
+                pollTpmsCorner(i, 0, "2A05", "2A0A");
                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
             }
             break;
-        case 6: // TPMS FR (222A06 on BCM 720) - skip if on TPMS (1)
+        case 6: // TPMS FR (222A06 / 222A0B on BCM 720) - skip if on TPMS (1)
             if (screen != 1) {
                 i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
-                if (i.elm.sendQuery("222A06", resp, sizeof(resp), 300)) {
-                    uint8_t ob[2];
-                    if (parseMode22Bytes(resp, "2A06", ob, 2)) {
-                        portENTER_CRITICAL(&i.mux);
-                        float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
-                        i.data.tirePressure[1] = psi / 14.5038f;
-                        i.data.tireTemp[1] = (float)ob[1] - 40.0f;
-                        i.data.tireKnown[1] = true;
-                        portEXIT_CRITICAL(&i.mux);
-                    }
-                }
+                pollTpmsCorner(i, 1, "2A06", "2A0B");
                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
             }
             break;
-        case 7: // TPMS RL (222A07 on BCM 720) - skip if on TPMS (1)
+        case 7: // TPMS RL (222A07 / 222A0C on BCM 720) - skip if on TPMS (1)
             if (screen != 1) {
                 i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
-                if (i.elm.sendQuery("222A07", resp, sizeof(resp), 300)) {
-                    uint8_t ob[2];
-                    if (parseMode22Bytes(resp, "2A07", ob, 2)) {
-                        portENTER_CRITICAL(&i.mux);
-                        float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
-                        i.data.tirePressure[2] = psi / 14.5038f;
-                        i.data.tireTemp[2] = (float)ob[1] - 40.0f;
-                        i.data.tireKnown[2] = true;
-                        portEXIT_CRITICAL(&i.mux);
-                    }
-                }
+                pollTpmsCorner(i, 2, "2A07", "2A0C");
                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
             }
             break;
-        case 8: // TPMS RR (222A08 on BCM 720) - skip if on TPMS (1)
+        case 8: // TPMS RR (222A08 / 222A0D on BCM 720) - skip if on TPMS (1)
             if (screen != 1) {
                 i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
-                if (i.elm.sendQuery("222A08", resp, sizeof(resp), 300)) {
-                    uint8_t ob[2];
-                    if (parseMode22Bytes(resp, "2A08", ob, 2)) {
-                        portENTER_CRITICAL(&i.mux);
-                        float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
-                        i.data.tirePressure[3] = psi / 14.5038f;
-                        i.data.tireTemp[3] = (float)ob[1] - 40.0f;
-                        i.data.tireKnown[3] = true;
-                        portEXIT_CRITICAL(&i.mux);
-                    }
-                }
+                pollTpmsCorner(i, 3, "2A08", "2A0D");
                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
             }
             break;
@@ -621,20 +656,19 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                                     }
                                 }
                                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+                                if (readUint8(i, "012F", "2F", b)) {
+                                    applyFuelSample(i, b);
+                                }
                             } else {
                                 if (readUint8(i, "012F", "2F", b)) {
-                                    portENTER_CRITICAL(&i.mux);
-                                    i.data.fuelLevelPct = parseCalibratedFuel(b);
-                                    portEXIT_CRITICAL(&i.mux);
+                                    applyFuelSample(i, b);
                                 }
                             }
                             break;
                         case 3:
                             if (i.data.isAutomatic && ((i.slowIdx / 2) % 16) == 7) {
                                 if (readUint8(i, "012F", "2F", b)) {
-                                    portENTER_CRITICAL(&i.mux);
-                                    i.data.fuelLevelPct = parseCalibratedFuel(b);
-                                    portEXIT_CRITICAL(&i.mux);
+                                    applyFuelSample(i, b);
                                 }
                             } else {
                                 // Poll Engine Load (0104 on PCM 7E0) - 100% on Header 7E0, zero header hops
@@ -977,6 +1011,38 @@ void ObdService::getPairedDevice(char* macBuf, size_t macLen, char* nameBuf, siz
 // ---------------------------------------------------------------------------
 // TPMS - Mode 22 manufacturer DIDs (MS-CAN)
 // ---------------------------------------------------------------------------
+void ObdService::pollTpmsCorner(Impl& i, uint8_t corner, const char* pressureDid,
+                                const char* tempDid) {
+    // ND TPMS DIDs return a single data byte each (formulas from Miata.net ND thread):
+    //   pressure psi = ((A * 1373) / 1000) * 0.145037738   (A = "2A05..2A08")
+    //   temperature  = A - 40  (Celsius)                    (A = "2A0A..2A0D")
+    if (corner >= 4) return;
+
+    char resp[BleElm::MAX_RESPONSE];
+    uint8_t pb = 0, tb = 0;
+    char cmd[16];
+
+    snprintf(cmd, sizeof(cmd), "22%s", pressureDid);
+    if (i.elm.sendQuery(cmd, resp, sizeof(resp), 300)) {
+        if (parseMode22Bytes(resp, pressureDid, &pb, 1)) {
+            float psi = (((float)pb * 1373.0f) / 1000.0f) * 0.145038f;
+            portENTER_CRITICAL(&i.mux);
+            i.data.tirePressure[corner] = psi / 14.5038f;
+            i.data.tireKnown[corner] = true;
+            portEXIT_CRITICAL(&i.mux);
+        }
+    }
+
+    snprintf(cmd, sizeof(cmd), "22%s", tempDid);
+    if (i.elm.sendQuery(cmd, resp, sizeof(resp), 300)) {
+        if (parseMode22Bytes(resp, tempDid, &tb, 1)) {
+            portENTER_CRITICAL(&i.mux);
+            i.data.tireTemp[corner] = (float)tb - 40.0f;
+            portEXIT_CRITICAL(&i.mux);
+        }
+    }
+}
+
 void ObdService::pollTpms(Impl& i, uint32_t now) {
     if (now - i.lastTpmsMs < MX5_TPMS_INTERVAL_MS) return;
     i.lastTpmsMs = now;
@@ -986,20 +1052,9 @@ void ObdService::pollTpms(Impl& i, uint32_t now) {
     i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
 
     const char* dids[4] = {"2A05", "2A06", "2A07", "2A08"};
+    const char* tempDids[4] = {"2A0A", "2A0B", "2A0C", "2A0D"};
     for (uint8_t k = 0; k < 4; k++) {
-        char cmd[16];
-        snprintf(cmd, sizeof(cmd), "22%s", dids[k]);
-        if (i.elm.sendQuery(cmd, resp, sizeof(resp), 250)) {
-            uint8_t ob[2];
-            if (parseMode22Bytes(resp, dids[k], ob, 2)) {
-                portENTER_CRITICAL(&i.mux);
-                float psi = (((float)ob[0] * 1373.0f) / 1000.0f) * 0.145038f;
-                i.data.tirePressure[k] = psi / 14.5038f;
-                i.data.tireTemp[k] = (float)ob[1] - 40.0f;
-                i.data.tireKnown[k] = true;
-                portEXIT_CRITICAL(&i.mux);
-            }
-        }
+        pollTpmsCorner(i, k, dids[k], tempDids[k]);
     }
 
     // Restore PCM header 7E0 from Header 720

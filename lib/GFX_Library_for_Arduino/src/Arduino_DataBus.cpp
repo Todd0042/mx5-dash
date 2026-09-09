@@ -150,6 +150,22 @@ void Arduino_DataBus::write16bitBeRGBBitmapR1(uint16_t *bitmap, int16_t w, int16
   }
 }
 
+void Arduino_DataBus::write16bitBeRGBBitmapR3(uint16_t *bitmap, int16_t w, int16_t h)
+{
+  uint16_t *p;
+  for (int16_t i = 0; i < w; i++)
+  {
+    p = bitmap + (w - 1) - i;
+    for (int16_t j = 0; j < h; j++)
+    {
+      _data16.value = *p;
+      write(_data16.lsb);
+      write(_data16.msb);
+      p += w;
+    }
+  }
+}
+
 void Arduino_DataBus::writePattern(uint8_t *data, uint8_t len, uint32_t repeat)
 {
   while (repeat--)

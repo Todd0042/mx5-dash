@@ -1,257 +1,286 @@
-# MX-5 Dash — Working Notes (direct read-handoff for continuing work)
+# MX-5 Dash — Working Notes & Hardware Handoff
 
-This file is the "where we left off" reference. It is meant to be read before
-continuing development so you (or an agent) can pick up exactly where the last
-hardware bring-up session ended. For long-term architecture/engineering rules
+This file is the authoritative "where we left off" reference for the **mx5-dash**
+project. Read it before continuing development so you (or an agent) can pick up
+exactly where the last bring-up session ended. For long-term architecture rules,
 see `GEMINI.md`.
 
----
-
-## Current Hardware Situation
-
-- **Board**: Waveshare ESP32-S3-Touch-LCD-3.5 **"C"** (Standard ST7796 SPI +
-  FT6336 capacitive touch, AXP2101 PMIC, TCA9554 port expander, BMA421 IMU).
-  This is the sibling of the 3.5" **"B"** (AXS15231B QSPI + AXS5106L touch).
-- **Car**: 2022 Mazda MX-5 RF GT (ND2 / SkyActiv-G).
-- **BLE OBD adapter**: **vLinker MC+** (Vgate), plugged into the OBD port of the
-  **running** car. Android Bluetooth settings shows its name as **"vLinker MS
-  08449"**. Vgate units only advertise while **unpaired/unbound**; once a phone
-  has bonded them they withhold advertisements from all other scanners. See the
-  BLE session notes below — this bond is the leading theory for why our radios
-  have never caught it.
-- The "3.5-C" variant was added as a firmware-supported sibling of the existing
-  "3.5-B" build (auto-detected by I2C probing for 0x3B vs 0x38 touch IC).
-
---- 
-
-## BLE Discovery Session (2026-09-08) — Two Core Bugs Found & Fixed
-
-### Bug 1 — the core-0 OBD task silently never ran ("auto-scan death")
-- `ObdService` spins up a FreeRTOS task on **core 0** (prio 2, 8 KB stack) that
-  drives all background BLE scanning / reconnect. It used to be created **after**
-  `NimBLEDevice::init()` in `ObdService::start()`.
-- On the ESP32-S3 the display/LVGL init (`ui.begin()`) consumes ~250 KB of
-  internal RAM. Measured free internal RAM right before BLE init: **~57 KB**;
-  after `NimBLEDevice::init()`: **7,180 B**.
-- `xTaskCreatePinnedToCore` therefore returned **pdFAIL (-1)** — no room for the
-  8 KB stack + TCB — and the task **never ran**. UI-triggered rescans still
-  worked (they call the NimBLE scan API directly), so the failure was invisible:
-  symptoms were "can't find / never connects" when the real problem was "no
-  background scanner exists at all".
-
-### Bug 2 — Naive "task first" fix made `NimBLEDevice::init()` hang
-- Reordering so the task ran first caused `NimBLEDevice::init()` to **hang
-  forever**: the 8 KB task had already consumed the heap NimBLE needs for its own
-  host task/buffers → deadlock. Verified with step prints: `begin step0 core=1`
-  printed, `begin step1 init-ok` never did, while the task stayed alive and
-  ticking the whole time.
-
-### The real fix — start OBD before the display (main.cpp `setup()`)
-- Internal RAM at setup start is **~310 KB** (measured: `int=309964 dma=302180`)
-  because nothing has initialized the UI yet. So `main.cpp` now does:
-  `UserPrefs::loadAll()` → `obd.setBlePrefix()/setBleScanTimeout()` →
-  `obd.start()` → `display.begin()` → `ui.begin()`. BLE + 8 KB task both fit
-  trivially in the pre-UI heap.
-- `BleElm::loop()` is gated on a `volatile bool initReady_` set at the end of
-  `begin()`, so the task never touches NimBLE before init completes.
-- Verified post-fix boot chain:
-  ```
-  [main] heap at setup start: int=309964 dma=302180
-  [bleElm] xTaskCreate -> 1 (pdPASS=1) stack/prio 8192/2 on core 0
-  [bleElm] begin step0 core=1 / step1 init-ok / step2 config-ok
-  [bleElm] initialized BLE subsystem (paired MAC: '', prefix: 'vLinker')
-  [bleElm] starting BLE scan ...        <- auto-scan now runs continuously
-  [bleElm] probe: conn=0 init=0 scan=1 ... implRdy=1
-  [bleElm] UI scan done: N device(s), core0 tick age = 12-19ms
-  ```
-  Cross-core loop health is reported as `core0 tick age` (3–19 ms) on the BT
-  screen and in the scan-done dump.
-
-### BLE Discovery & Connectivity Root Causes Resolved (2026-09-08 Session)
-- **Root Cause 1 — ESP32 Controller HCI Duplicate Filtering (`filter_duplicates`)**:
-  - `startScanInternal()` was calling `pScan->setAdvertisedDeviceCallbacks(scanCbs_, false)` with `wantDuplicates = false`.
-  - In NimBLE, `wantDuplicates = false` enables hardware controller duplicate filtering (`filter_duplicates = 1`).
-  - When the vLinker adapter first advertised, its initial `ADV_IND` packet arrived without the local device name (names are delivered in the `SCAN_RSP` scan response packet). `onResult()` evaluated the empty name, returned without adding it to `discoveredDevices_`, and then the ESP32 HCI controller **permanently suppressed all subsequent advertising packets and scan responses** from that adapter MAC! `onResult()` was never called again when the name packet arrived.
-  - **Fix**: Set `wantDuplicates = true` (`pScan->setAdvertisedDeviceCallbacks(scanCbs_, true)`). `BleElm`'s `onResult()` already deduplicates and updates existing entries in `discoveredDevices_`.
-- **Root Cause 2 — False Device Matching & Phone MAC Loops**:
-  - `isVLinkerName()` included broad substring keywords (`car`, `link`, `vr`, `mcu`) which matched cabin Bluetooth devices (such as Android Auto, phone names, or headsets).
-  - Tapping an unnamed/phone entry on the display saved its MAC (`07:0A:71:97:28:BB`) to NVS.
-  - `discoverGatt()` possessed a loose generic fallback loop that matched Google Nearby Share (`0xFEF3`) on the phone, treating it as an OBD service. `BleElm` sent `ATZ\r` to the phone's Nearby Share service, timed out waiting for an ELM prompt (`>`), disconnected, and retried infinitely—preventing the ESP32 from ever connecting to the real vLinker adapter in pairing mode.
-  - **Fix**: Removed ambiguous keywords (`car`, `link`, `vr`, `mcu`) from `isVLinkerName()` and eliminated the generic fallback loop from `discoverGatt()`, strictly requiring recognized OBD service UUIDs (`e781...`, `FFF0`, `FFE0`, `18F0`). Erased NVS to clear the phone MAC.
-- **Root Cause 3 — MITM Passkey Security Requirement (`mitm = true`)**:
-  - `begin()` called `NimBLEDevice::setSecurityAuth(true, true, true)`.
-  - The second parameter `mitm = true` required Man-In-The-Middle passkey/PIN entry authentication. Headless BLE OBD adapters (vLinker MC+, OBDLink CX, Veepeak) do not have displays or keypads for PIN entry and use "Just Works" pairing. Demanding MITM protection caused security negotiation (SMP) to fail on connection.
-  - **Fix**: Set `NimBLEDevice::setSecurityAuth(true, false, true)` (`mitm = false`) and `NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT)`.
-- **Root Cause 4 — Scan Window Duty Cycle Gap**:
-  - `setInterval(97)` and `setWindow(67)` set 97 ms interval and 67 ms window (arguments in ms in NimBLE).
-  - This left a 30 ms blind gap every 97 ms (~31% radio off-time). OBD adapter advertisements falling in that gap were missed.
-  - **Fix**: Set `setInterval(100)` and `setWindow(99)` for continuous 100% duty cycle active scanning.
-
-### TEMP diagnostic instrumentation still in place (remove after first connect)
-- `BleElm.cpp`: `begin()` step prints, `loop()` probe print, RX advertising dump
-  in `onResult` (`[bleElm] RX adv: ...`), `diagBuffer_/diagLen_/diagCount_`.
-- `ObdService.cpp/.h`: task-entered + 5 s tick prints, xTaskCreate/heap prints,
-  `volatile uint32_t implTickMs_`, `diagBuffer()/diagCount()/core0TickAgeMs()`
-  overrides.
-- `ObdSource.h` (lib/mx5_config): diagnostic virtuals so the native build
-  compiles.
-- `Mx5UI.cpp`: scan-done diag dump + 2 s core0-age print on the BT screen
-  (all `#if defined(ARDUINO)`-guarded).
-- `main.cpp`: `heap at setup start` print.
+**Status: WORKING.** The dash boots, connects to the OBDLink CX over BLE, and
+streams live telemetry (RPM, speed, coolant, oil temp, ambient temp, fuel, TCM
+gear for the 6AT, TPMS). Last verified session: 2026-09-09.
 
 ---
 
-## Where We Left Off / Current Status
+## 1. Current Hardware & System Profile
 
-Everything below is **done and verified in the latest build/flash on the 3.5-C
-board**, and is committed to GitHub:
+- **Board**: Waveshare ESP32-S3-Touch-LCD-3.5B (ESP32-S3R8, 16 MB Flash, 8 MB
+  Octal PSRAM, 480x320 viewable, FT6336 capacitive touch).
+- **Panel driver**: `esp32s3_touch_lcd_3_5` PlatformIO env; Waveshare 3.5-C
+  ST7796 SPI via QSPI + HV511/other touch. Rotation applied post-begin from NVS.
+- **Power & Peripherals**:
+  - **AXP2101 PMIC** (I2C `0x34`): rails ALDO/BLDO/DLDO energized at boot.
+  - **TCA9554 Port Expander** (I2C `0x20`): pulses LCD hardware reset on Pin 1.
+  - **Touch**: FT6336 / AXS5106L (I2C `0x38`).
+- **Vehicle**: 2022 Mazda MX-5 RF GT (ND2, SkyActiv-G 2.0L, **6-speed automatic**).
+- **OBD adapter**: OBDLink CX (STN1170) — the ONLY scanner that works (see §4).
 
-1. **Display works on 3.5-C**: ST7796 detected, initialized, and rendering.
-   - Red now renders **red** (fixed by flushing the LVGL buffer through the
-     byte-swap-aware `draw16bitBeRGBBitmap` on the ST7796 branch — the "B"
-     panel path uses `draw16bitBeRGBBitmapR1` instead).
-   - The earlier "display blinks" issue was caused by *repeated flashing*
-     during bring-up; with a normal boot it does **not** blink.
-2. **Rotation defaulted to USB Left**: `MX5_LCD_ROTATION 1`.
-   - Boot now **unconditionally** re-applies the saved rotation in
-     `src/main.cpp:43` (`display.setRotation(savedRot);`) so the boot state is
-     byte-identical to choosing "USB LEFT" in the Settings screen. The settings
-     buttons are wired: USB LEFT → rotation 1, USB RIGHT → rotation 3
-     (`Mx5UI.cpp` cases 101/102). Touch mapping is rotation-aware in
-     `Waveshare35B.cpp` `my_touchpad_read`.
-   - **Note**: the physical mapping of rotation value → USB side is relative to
-     how you hold the panel; if the panel still looks "USB right" on this board
-     with rotation 1, flip `MX5_LCD_ROTATION` in `lib/mx5_config/Config.h`
-     between 1 and 3 and re-test (both values are symmetric MADCTL swaps on
-     ST7796).
-3. **BLE scan filter rewritten** (`lib/obd_ble/BleElm.cpp`) so the dash only
-   finds the **vLinker** instead of phantom/unusable devices:
-   - `isVLinkerName()` accepts "v…linker" across any separators/case
-     (vLinker MC, V-LINKER, V_LINKER, V Linker, etc.).
-   - Fallback: any advertiser advertising an OBD-ish service UUID
-     (`FFF0` / `FFE0` / `18F0`) is also listed.
-   - Auto-connect only ever targets the **explicitly paired MAC** (from the
-     wizard / BT setup); the old "save the first OBD-looking device" auto-bond
-     block was removed.
-4. **NVS state on the board** (as of last flash):
-   `rot=1 units=1 theme=0 bri=95 ble='vLinker' mac='' configured=0`
-   - `configured=0` means the **initial setup wizard will run** on next boot,
-     taking you through OBD2 pairing. That's exactly the state we want for
-     in-vehicle testing.
-   - To return to the wizard any time: `pio run -e esp32s3_touch_lcd_3_5 -t erase`
-     then re-upload.
-5. **Backlight**: moved to GPIO6 (`MX5_PIN_BACKLIGHT 6`); auto-dim active
-   (day 95% / night 25%, night = battery < 12.8 V). Selftest disabled
-   (`MX5_DISPLAY_SELFTEST 0`).
-6. **Builds**: `esp32s3_touch_lcd_3_5` (the 3.5-C env, extends the 3.5-B env),
-   `esp32s3_touch_lcd_3_5b`, and `native_preview` all compile. Arduino_GFX +
-   XPowersLib + TCA9554 + SensorLib are **vendored locally** under `lib/`
-   (GFX removed from registry `lib_deps` because the 3.5-C board needs the ST7796
-   driver from a pinned version).
-7. **Android side**: continued in lockstep (AndroidMx5UI.cpp overhaul,
-   BluetoothSerialManager.kt rework, MainActivity + Mx5RenderView tweaks). It is
-   **not** the current focus — hardware test phase is.
-8. **BLE driver fixed**: the core-0 background scan task now actually runs
-   (`obd.start()` moved before display init, see session notes above) — auto
-   scan, scan pacing, and result delivery are all live on the board. The only
-   open piece is the **vLinker MC+ not advertising to us** (bond-cache theory,
-   see above).
+---
 
-## Verified Boot Log (last 3.5-C flash, sanity reference)
+## 2. Software Architecture
 
 ```
-[prefs] loaded: rot=1 units=1 theme=0 bri=95 ble='vLinker' mac='' configured=0
-[display] detected Waveshare 3.5 / 3.5-C (ST7796 SPI + FT6336 Touch at 0x38)
-[display] TCA9554 found at 0x20, pulsing pin 1 (LCD Reset)...
-[display] LCD hardware reset via TCA9554 complete.
-[main] applied rotation 1
-[bleElm] initialized BLE subsystem (paired MAC: '', prefix: 'vLinker')
-[main] ready
-[display] flush #1: x1=0 y1=0 x2=479 y2=319   (full-frame, no partial flushes)
+core 1 : display + LVGL (Arduino loop)     — Mx5UI, Waveshare35B
+core 0 : ObdService FreeRTOS task          — BLE ELM327 polling
 ```
 
-## Next Steps (in-vehicle, in order)
+- Cross-core communication is a critical-section-protected `VehicleData`
+  snapshot; the UI calls `obd.snapshot()` every frame, never touching BLE.
+- **OBD service starts BEFORE display/LVGL init** in `main.cpp` `setup()`. On the
+  S3, the UI's LVGL buffers eat ~250 KB internal RAM; starting NimBLE after that
+  left too little heap for the 8 KB OBD task stack and NimBLE init (**pdFAIL /
+  init hang**). Starting BLE first keeps ~310 KB free.
+- BLE prefix and scan timeout are loaded from NVS and passed before `start()`.
 
-0. **Unbind the MC+ from the phone so it advertises again.** Per the session
-   notes: verify whether "vLinker MS 08449" is live or bond-cache, long-press
-   the MC+ button to unbind if needed, then re-press for a fresh pairing window.
-   Only then will the board's auto-scan (and laptop bleak) see it.
-1. **Run the setup wizard** (board is at `configured=0`).
-   - Pair the vLinker (BLE MAC shown in the discovery list during the wizard).
-   - Confirm USB Left orientation is correct on boot; if it comes up "USB right"
-     instead, flip `MX5_LCD_ROTATION` 1 ↔ 3 in `Config.h`, rebuild, flash, and
-     re-check (see rotation note above).
-2. **Confirm live OBD2 data** on the dashboard once paired (Speed/RPM/etc.).
-3. **Verify the full screen carousel** works with touch swipes
-   (Speed → TPMS → Temps → Diag → Track → RPM → Trip → Menu + sub-dashboards).
-4. **Then, the big pending task: full per-screen UI redesign for 3.5" 480x320**.
-   - The current fonts are compiled for the smaller 320x240-ish scale and look
-     "garbled"/wrong at 480×320.
-   - Candidates: `lib/mx5_ui/lv_font_mono_120` (used at `Mx5UI.cpp:704`),
-     `lv_font_mono_96`, `lv_font_mono_48`; LVGL conf in `lib/mx5_ui/lv_conf.h`
-     (`LV_COLOR_16_SWAP 1`, Montserrat 8–48 default 14).
-   - Start with the **Wizard** and **Speed** screens, establish a consistent
-     type scale for 480×320, rebuild/flash per screen batch.
-   - Colors & auto-dim live at `Mx5UI.cpp:33-49` and `Mx5UI.cpp:3237-3262`.
-   - Every screen is built once in `ui.begin()` and updated each `loop()`; the
-     screen list/order is defined in `GEMINI.md` Rule 2.
+---
 
-## Build / Flash / Log Workflow
+## 3. Build, Flash & Serial Diagnostics
 
-- **Build**:
-  ```bash
-  ~/.platformio/penv/bin/pio run -e esp32s3_touch_lcd_3_5
-  ```
-  Build all targets at once per GUIDELINES (`GEMINI.md` Rule 7):
-  ```bash
-  ~/.platformio/penv/bin/pio run -e native_preview -e esp32s3_touch_lcd_3_5 -e esp32s3_touch_lcd_3_5b
-  ```
-- **Upload** (must run under the `uucp` group in this shell):
-  ```bash
-  newgrp uucp -c "~/.platformio/penv/bin/pio run -e esp32s3_touch_lcd_3_5 -t upload --upload-port /dev/ttyACM0"
-  ```
-- **Erase NVS then re-upload** (returns to the wizard):
-  ```bash
-  newgrp uucp -c "~/.platformio/penv/bin/pio run -e esp32s3_touch_lcd_3_5 -t erase"
-  ```
-  then upload again as above.
-- **Serial log**: `pio device monitor` fails with termios "Inappropriate ioctl"
-  in the bash tool. Use raw pyserial instead:
-  ```bash
-  ~/.platformio/penv/bin/python -c "import serial,time; s=serial.Serial('/dev/ttyACM0',115200,timeout=2); s.setDTR(False); s.setRTS(False); start=time.time()
-  while time.time()-start<9:
-      d=s.read(s.in_waiting or 1)
-      if d: print(d.decode('utf-8','replace'),end='',flush=True)"
-  ```
-  (mind `newgrp uucp` for permission on the port).
-- **Helper scripts**: `tools/flash_esp32.sh` and `tools/scan_esp32.sh` exist;
-  note `flash_esp32.sh` currently hardcodes the old `_3_5b` env — update to the
-  active env if you use it.
+```bash
+# Build (must be in the uucp group for serial access afterwards)
+newgrp uucp -c "/home/todd/.platformio/penv/bin/pio run -e esp32s3_touch_lcd_3_5"
 
-## Recurring Gotchas
+# Flash
+newgrp uucp -c "/home/todd/.platformio/penv/bin/pio run -e esp32s3_touch_lcd_3_5 \
+    -t upload --upload-port /dev/ttyACM0"
+```
 
-- **vLinker advertising**: only advertises while **unpaired/unbound** — once any
-  phone bonded it, it hides from all other scanners. If the dash "finds nothing"
-  while the phone still lists it under *Paired devices*, the phone listing is
-  **bond cache**, not a live advertisement; unbind the **adapter** (long-press
-  its button) and then test with fresh pairing.
-- **ESP32-S3 heap under NimBLE**: `NimBLEDevice::init()` eats ~50 KB of internal
-  RAM, and display/LVGL init eats ~250 KB **before** that. On this board you get
-  exactly one shot — start BLE and its 8 KB core-0 task **before** `ui.begin()`,
-  or either the task creation returns `pdFAIL` or BLE init hangs. Keep the
-  pre-UI ~310 KB window for all of it.
-- **Old "B" model paths still exist** (`Arduino_AXS15231B` driver files were
-  deleted in favor of vendored Arduino_GFX which provides it). The 3.5B env
-  still builds; if the B panel was re-introduced, re-verify the QSPI R1 flush
-  path (`draw16bitBeRGBBitmapR1`).
-- **Rotation vs touch**: changing rotation 1↔3 must keep
-  `my_touchpad_read`'s rotation cases consistent with the chosen MADCTL.
-- **GPIO pins**: backlight is GPIO6 on the 3.5-C. SDA=8 / SCL=7 (with SCL=9
-  fallback probe in `Waveshare35B.cpp::initPower`).
+- Serial permission: member of `uucp` group (or `sudo chmod 666 /dev/ttyACM0`).
+- **Kill any serial capture by PID before flashing** (the port is in use):
+  `pgrep -af live_capture.py | grep -v pgrep` then `kill <pid>`.
+  Never `pkill -f live_capture.py` inside the tool's own shell.
+- Logging is UART @ 115200. Boot log includes `[main]`, `[display]`, `[bleElm]`,
+  `[obd]`, `[tcm]`, `[prefs]`.
 
-## Git
+---
 
-- Remote: `origin  https://github.com/Todd0042/mx5-dash.git` (branch `main`).
-- Follow the repo's conventional-commit style (see `git log --oneline`).
-- After any change, `git add -A && git commit && git push` — the laptop clone
-  should pull before/after working sessions.
+## 4. Connecting the OBDLink CX Scanner (BLE)
+
+### 4.1 Scanner hardware facts (official OBDLink docs)
+
+- **BLE 5.1 only** — no Classic BT. The ESP32-S3 can drive it (vLinker MS cannot).
+- Custom UART service `0000FFF0`: **FFF1 = Notify**, **FFF2 = Write / Write-without-Response**.
+- MTU max **247**, no queued writes.
+- **Bonding is only accepted during the first 5 minutes after the CX powers on.**
+- **Pairing is triggered by subscribing FFF1 or writing FFF2** (per the official
+  app flow), NOT by a scan-level pair.
+- **Always uses built-in BLE encrypted communications.** PIN for legacy
+  standards = `123456`.
+- **LED**: fast blink = "paging its bonded host" (directed advertising); slow
+  blink = normal advertising.
+- Address type is **public** (`0`).
+
+### 4.2 Why it failed originally — the six gotchas (all fixed)
+
+1. **CCCD must be written WITH a write response.** NimBLE-Arduino
+   `subscribe(true, cb)` writes the CCCD without response; the CX silently drops
+   it (the call looks successful, so notifications never arrive and `ATZ`
+   responses never come). Fix: `pNotifyChar_->subscribe(useNotify, cb, true)`
+   AND **read the CCCD back** (`readValue<uint16_t>() == 0x0001`) to prove it.
+2. **Don't `deleteAllBonds()` on every boot.** That erases the dash↔CX LTK; the
+   CX then needs a fresh 5-minute bonding window after EVERY reboot. Keep the
+   bond — a resumed bond re-encrypts in 0 ms and works.
+3. **The CX does not undirected-advertise to non-bonded hosts**, and after
+   bonding it fast-blinks *directed* advertising to its known bond. The scan may
+   never surface it, so pure scan+connect fails forever. Fix: **forced
+   direct-address connect** every ~5 s when the scan hasn't surfaced the known
+   adapter — poke `pairedMac_` from NVS, else the hardcoded fallback
+   `48:23:35:57:99:16` (BleElm.cpp `g_forcedAdapterMac`, TEMP DIAGNOSTIC).
+4. **Stale resumed enc** (`bonded=1 enc=1 in 0ms`) can look healthy yet not
+   flow data — the link is only truly functional after a *fresh* pairing
+   replaces the old LTK.
+5. **Post-bond link drop is expected** (~1 s after a new bond is applied). Keep
+   the target (don't blacklist), reconnect — the second connect re-encrypts in
+   0 ms and holds.
+6. **Only blacklist unnamed junk** (earbuds/neighbor BLE physically reject with
+   error 13 and were eating connect budget). Never blacklist a device matched by
+   name/OUI/GATT UUID on a data-path failure.
+
+### 4.3 Connection algorithm (boot → live telemetry)
+
+1. **BleElm::begin("OBDLink")**: loads `paired_mac`/`paired_name` from NVS;
+   NimBLE init; NO `deleteAllBonds()`; `setPower(P9)` max TX for cabin range;
+   security IO = no-input-no-output, bonding + secure-connect (`setSecurityAuth(true,false,true)`);
+   passkey callback auto-returns `123456`; MTU 247; client connect timeout 8 s.
+2. **Idle loop while unconnected** (BleElm.cpp `loop()`):
+   - No target yet → if the scan hasn't surfaced the known adapter and ≥5 s
+     since the last poke, **force a direct-address connect** to the paired MAC
+     (or the hardcoded fallback). Otherwise run a 5 s **active scan**
+     (100 ms interval/window, 100% duty, async completion callback) and accept a
+     candidate if it matches the name prefix (`OBDLink`, `vLinker`, `VEEPEAK`,
+     `V-gate`…), advertises the FFF0 service UUID, is an exact paired-MAC match,
+     — or, when unpaired, is connectable with RSSI > −80.
+   - Junk that physically rejects the connection gets blacklisted for the boot.
+3. **Connect** (public addr type) → discover GATT on FFF0 → find the notify
+   char (FFF1) and write char (FFF2) → **subscribe FFF1 with response** →
+   **CCCD readback** → ELM init handshake (`ATZ` etc.) → `connected_ = true`.
+4. If this device had no stored MAC yet, `pairDevice()` saves the MAC+name to NVS.
+5. Handle the expected post-bond drop: reconnect immediately, don't blacklist.
+
+### 4.4 On-device pairing wizard (what the driver does)
+
+- Boot with `configured=1` → goes straight to the driver cluster (Speed screen).
+  Connection progress shows in the top banner ("SEARCHING…" → "LIVE OBD-II •
+  CONNECTED" → "DISCONNECTED • RECONNECTING…").
+- First-run / re-setup → **Wizard** (`SCREEN_WIZARD`, 4 steps:
+  `1. CONNECT → 2. CONFIG → 3. TPMS → 4. READY`):
+  - **Step 1 CONNECT**: shows "SEARCHING FOR OBDLINK CX ADAPTER…" and
+    auto-connects; on CAN handshake OK it flips to "OBDLINK CX CONNECTED & CAN
+    HANDSHAKE OK!" and auto-advances to Step 2 (Transmission & Units, then TPMS
+    calibration, then READY).
+- Wizard freeze fix: `ObdService::loopTask()`'s `frozen_` path (wizard up) did
+  not update `data.connected`, so the wizard always showed "SEARCHING" even when
+  connected. The frozen branch now sets `connected = isInit` (and
+  `lastUpdateMs`) under the mux before continuing.
+
+### 4.5 Re-pairing / recovering a dead bond
+
+- **Symptom**: CX fast-blinking, or dash has blank `paired_mac`, or data never
+  flows despite `bonded=1 enc=1`.
+- **Fix**: power-cycle the CX (pull and re-seat in the OBD port), then within its
+  5-minute bonding window let the dash reconnect (wizard Step 1 or a reboot). It
+  pokes the MAC directly and answers the passkey as `123456` automatically. A
+  successful new pairing **replaces** the old single bond.
+- The dash's stored bond survives re-flashes (`paired_mac` lives in NVS).
+- **Laptop isolation tool** (proves the CX + car are healthy while the dash is
+  suspect): `bluetoothctl pair` (enter PIN `123456`), or a small bleak script
+  that subscribes FFF1, writes `ATZ` / `0100` to FFF2 and prints notifications.
+  Use `bluetoothctl remove <mac>` afterwards to free the CX's single-bond slot.
+
+### 4.6 Troubleshooting quick reference
+
+| Symptom | Cause / fix |
+| --- | --- |
+| Never connects, CX fast-blinking | CX is directed-adv to its old bond; power-cycle it and re-pair within 5 min |
+| Connects but no data, `bonded=1 enc=1` | Stale LTK — force a fresh pairing to replace it |
+| Scan shows nothing at all | CX won't undirected-advertise; rely on the forced direct-address poke |
+| CCCD readback ≠ 0x0001 | Notifications will never fire; subscriber wrote CCCD without response |
+| Many "error 13" rejections | Unnamed BLE junk — blacklist logic should be eating these |
+| Wizard stuck on "SEARCHING" | Old bug (fixed); verify `data.connected` is set in the frozen branch |
+
+---
+
+## 5. Telemetry — PIDs, DIDs & Decoders
+
+| Signal | Query | Value | Cadence | Notes |
+| --- | --- | --- | --- | --- |
+| RPM | `010C` | 16-bit /4 | 100 ms | PCM 7E0 |
+| Speed | `010D` | 1 byte (km/h) | 300 ms | PCM 7E0 |
+| Coolant | `0105` | byte − 40 | 300 ms | PCM 7E0 |
+| Load | `0104` | byte % | 1200 ms | PCM 7E0 |
+| Throttle | `0111` | byte % | 1200 ms | PCM 7E0 |
+| Fuel level | `012F` | byte % | 1200 ms | PCM 7E0; linear calibrate (see §5.3) |
+| Intake air | `010F` | byte − 40 | 1200 ms | PCM 7E0 |
+| Battery | `0142` | *0.1 V | 1200 ms | PCM 7E0 |
+| Ambient temp | `0146` | byte − 40 | 25 s | PCM 7E0 (Mode 01; the Mode-22 "220146" listed in old docs is NOT used) |
+| Oil temp | `221310` | 16-bit /100 − 40 | 3 s | PCM 7E0, best-effort |
+| TCM gear | `221E12` | 1 byte | on AT only | Header **7E1** (see §5.1) |
+| TPMS pressure | `222A05…2A08` | 1 byte | per TPMS interval | Header **720** (BCM, MS-CAN) (see §5.2) |
+| TPMS temp | `222A0A…2A0D` | 1 byte | per TPMS interval | Header 720 (see §5.2) |
+
+Header switching uses `ATSH <id>` before the query (7E0 default, 7E1 TCM, 720 BCM).
+
+### 5.1 TCM gear / PRND — ND 6AT (DID 221E12, header 7E1)
+
+Captured empirically on-road 2026-09-09 (P→R→N→D→N→R→P sequence):
+`46 → 3C → 32 → 01 → 32 → 3C → 46`.
+
+| Byte | Meaning |
+| --- | --- |
+| `0x46` | P |
+| `0x3C` | R |
+| `0x32` | N |
+| `0x01…0x06` | D1…D6 |
+| anything else | `D` + `-` (e.g. "D–" while shifting) |
+
+`estimateGear()` at standstill falls back to the decoded TCM PRND instead of
+assuming P. **Do not 'fix' this table to 0x70/0x60/0x50 guesses — those were the
+original bug** (P read "6" and R read "–").
+
+### 5.2 TPMS — ND formulas (DID 222A05–08 + 222A0A–0D, header 720)
+
+- Pressure DIDs (`2A05..2A08`) return a **single data byte**:
+  `psi = ((A * 1373) / 1000) * 0.145037738` (Miata.net ND thread).
+- Temperature is a **separate** DID pair (`2A0A..2A0D`): `C = A − 40`.
+- The old code parsed 2 bytes — that is why nothing displayed. `pollTpmsCorner()`
+  reads one byte per DID.
+- TPMS calibration (wizard Step 3) round-robins all four `222Axx` candidates and
+  binds a DID to the active corner by catching which one changes.
+
+### 5.3 Fuel level (012F)
+
+- `parseCalibratedFuel(raw)` is linear: `((raw − 8) * 100) / 216`. Averaging raw
+  == averaging percent.
+- **Display**: a U-shaped dot trough inside a card (left side up 2.5→10%, top
+  row 10→90%, right side down 90→97.5%) + two readouts:
+  - `C x.x gal` — current fuel (white), tank = **11 gal**, `gal = pct/100 * 11`.
+  - `M y.y gal` — missing fuel (Soul Red `0xC41230` accent): `11 − cur`.
+- **Averaging** (`applyFuelSample`): first sample passes immediately; afterwards
+  it's the **median** of all samples in a trailing 30 s ring (median ignores
+  slosh spikes a mean would drag), plus **fast-fill detection** (a new raw ≥ 8
+  points above the median resets the window and jumps to the fresh value).
+
+---
+
+## 6. UI Architecture (Mx5UI)
+
+- Screens: `SCREEN_SPEED` (0), `SCREEN_TPMS` (1), `SCREEN_WIZARD`; dynamic
+  view-driven polling via `ObdService::setActiveScreen()`.
+- Speed screen right column (166 px): `rpmSeg_` = `buildDottedArc(166×166)` at
+  (0,0); `fuelSeg_` = `buildFuelGauge(166×72)` at (0,178) (U-trough, no caption).
+- `SegArc` struct carries `wrap`, `dots[24]`, `count`, `pct10[24]` (fuel
+  thresholds in percent×10), `val`, `sub`. **Gotcha:** `pct10` must be
+  `uint16_t` (values up to 975) and `count` must be
+  `sizeof(arr)/sizeof(arr[0])` — `sizeof(uint16_t[15])` is 30, which previously
+  overran `dots[24]` and caused a `LoadProhibited` boot loop.
+- Warning system: speed/rpm warning card + banner; `warningMutedForDrive_`
+  **re-arms when the condition clears** (once muted it used to stay muted
+  forever); whole card + value are tappable; sub-text is condition-aware
+  ("PULL OVER • ENGINE OVERHEATING" / "REFUEL SOON").
+
+---
+
+## 7. Session Log (2026-09-09)
+
+- Fixed 6AT gear decode via on-road capture (see §5.1); fixed speed/gear/rpm/ambient
+  arc readouts that never updated; added `012F` polling on the automatic path.
+- Fixed TPMS: single-byte parse + temp DIDs + `pollTpmsCorner()`.
+- Flashed; user confirmed speed, gear, rpm, fuel, ambient temp, TPMS all working.
+- Removed ambient card from speed screen; fuel became a wide bar, then a U-trough
+  with C/M gallon readouts.
+- Warning system fixes (§6). Boot-loop fixed (§6 SegArc gotcha) and verified on
+  serial; removed the "FUEL" caption from the fuel card.
+
+## 8. Pending / Noted For Later
+
+- **TEMP DIAGNOSTICS still in tree to trim**: `[bleElm]` probe prints, task-tick
+  print, `RX notify len=` dump + `RX adv:`, heap print, `[tcm]` line,
+  `g_forcedAdapterMac` (keep as an unpaired fallback but consider making it
+  NVS-configurable), and `[main]` startup heap prints.
+- First `AT\r` in `initAdapter` may return `?` (wake/race); `ATZ` then resets
+  cleanly. Consider sending ATZ first.
+- Scan/junk race: an OBD-looking candidate captured before the paired-MAC poke is
+  harmless now (pair poke wins on fallback) but candidate selection could prefer
+  OBD-flagged devices.
+- `qr/` directory (untracked) holds Wi-Fi-AP-offload QR screenshots — not part of
+  the firmware.
+
+---
+
+## 9. Deployment notes for pushing
+
+- Remote: `https://github.com/Todd0042/mx5-dash.git` (git credential helper =
+  `store`; `gh` authenticated as **Todd0042**).
+- **Do not commit without being asked.** When committed, this Notes file itself
+  should be in the commit.
+- Never commit secrets: OBD PIN `123456` is a published factory default and the
+  CX MAC is a diagnostic fallback — fine to keep, but no tokens/keys ever.

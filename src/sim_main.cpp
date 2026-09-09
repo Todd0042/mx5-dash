@@ -400,20 +400,7 @@ int main(int argc, char** argv) {
             fflush(stdout);
         }
 
-        // Also dump DTC Diagnostic Health Modal
-        ui.setScreen(Mx5UI::SCREEN_DIAG);
-        ui.openDtcGuide(0);
-        ui.update();
-        lv_timer_handler();
-        lv_refr_now(disp);
-        char modalPath[512];
-        snprintf(modalPath, sizeof(modalPath), "%s/screen_6_modal.bmp", outDir);
-        saveRgb565Bmp(modalPath, g_currentFramebuffer, SIM_W, SIM_H);
-        printf("[SCREENSHOT] Saved %s\n", modalPath);
-        fflush(stdout);
-        ui.hideDtcRepairGuide();
-
-        // Also dump Dynamic Warning on Speedometer Screen
+        // Dump Dynamic Warning on Speedometer Screen
         obd.overrideTireLow = true;
         ui.setScreen(Mx5UI::SCREEN_SPEED);
         ui.update();
@@ -426,20 +413,7 @@ int main(int argc, char** argv) {
         fflush(stdout);
         obd.overrideTireLow = false;
 
-        // Also dump SD Card Format Modal
-        ui.setScreen(Mx5UI::SCREEN_DIAG_SUB_LOGS);
-        ui.showSdFormatModal();
-        ui.update();
-        lv_timer_handler();
-        lv_refr_now(disp);
-        char sdPath[512];
-        snprintf(sdPath, sizeof(sdPath), "%s/screen_12_modal.bmp", outDir);
-        saveRgb565Bmp(sdPath, g_currentFramebuffer, SIM_W, SIM_H);
-        printf("[SCREENSHOT] Saved %s\n", sdPath);
-        fflush(stdout);
-        ui.hideSdFormatModal();
-
-        // Also dump Night Mode Speedometer & RPM Gauges
+        // Dump Night Mode Speedometer Screen
         ui.setNightMode(true);
         ui.setScreen(Mx5UI::SCREEN_SPEED);
         ui.update();
@@ -449,16 +423,6 @@ int main(int argc, char** argv) {
         snprintf(nightSpeedPath, sizeof(nightSpeedPath), "%s/screen_0_night.bmp", outDir);
         saveRgb565Bmp(nightSpeedPath, g_currentFramebuffer, SIM_W, SIM_H);
         printf("[SCREENSHOT] Saved %s\n", nightSpeedPath);
-        fflush(stdout);
-
-        ui.setScreen(Mx5UI::SCREEN_RPM);
-        ui.update();
-        lv_timer_handler();
-        lv_refr_now(disp);
-        char nightRpmPath[512];
-        snprintf(nightRpmPath, sizeof(nightRpmPath), "%s/screen_2_night.bmp", outDir);
-        saveRgb565Bmp(nightRpmPath, g_currentFramebuffer, SIM_W, SIM_H);
-        printf("[SCREENSHOT] Saved %s\n", nightRpmPath);
         fflush(stdout);
         ui.setNightMode(false);
 
@@ -517,33 +481,13 @@ int main(int argc, char** argv) {
                 if (e.key.keysym.sym == SDLK_ESCAPE)      quit = true;
                 else if (e.key.keysym.sym == SDLK_LEFT)   ui.prevScreen();
                 else if (e.key.keysym.sym == SDLK_RIGHT)  ui.nextScreen();
-                else if (e.key.keysym.sym == SDLK_UP || e.key.keysym.sym == SDLK_DOWN) ui.toggleMenu();
-                else if (e.key.keysym.sym >= SDLK_1 && e.key.keysym.sym <= SDLK_8) {
-                    ui.setScreen((uint8_t)(e.key.keysym.sym - SDLK_1));
-                } else if (e.key.keysym.sym == SDLK_9 || e.key.keysym.sym == SDLK_f) {
-                    ui.setScreen(Mx5UI::SCREEN_DIAG_SUB_FUEL);
-                } else if (e.key.keysym.sym == SDLK_0 || e.key.keysym.sym == SDLK_m) {
-                    ui.setScreen(Mx5UI::SCREEN_DIAG_SUB_CYL);
-                } else if (e.key.keysym.sym == SDLK_c) {
-                    ui.setScreen(Mx5UI::SCREEN_DIAG_SUB_CHASSIS);
-                } else if (e.key.keysym.sym == SDLK_s) {
-                    ui.setScreen(Mx5UI::SCREEN_DIAG_SUB_SMOG);
-                } else if (e.key.keysym.sym == SDLK_l) {
-                    ui.setScreen(Mx5UI::SCREEN_DIAG_SUB_LOGS);
-                } else if (e.key.keysym.sym == SDLK_p) {
-                    ui.setScreen(Mx5UI::SCREEN_SETTINGS);
-                } else if (e.key.keysym.sym == SDLK_b) {
-                    ui.setScreen(Mx5UI::SCREEN_BLE_CONFIG);
-                } else if (e.key.keysym.sym == SDLK_w) {
-                    ui.runSetupWizard();
-                } else if (e.key.keysym.sym == SDLK_t) {
-                    ui.runTpmsRecalibration();
-                } else if (e.key.keysym.sym == SDLK_g) {
-                    ui.setScreen(Mx5UI::SCREEN_DIAG);
-                    ui.showDtcRepairGuide("P0171");
-                } else if (e.key.keysym.sym == SDLK_n) {
+                else if (e.key.keysym.sym == SDLK_1)      ui.setScreen(Mx5UI::SCREEN_SPEED);
+                else if (e.key.keysym.sym == SDLK_2)      ui.setScreen(Mx5UI::SCREEN_TPMS);
+                else if (e.key.keysym.sym == SDLK_w)      ui.runSetupWizard();
+                else if (e.key.keysym.sym == SDLK_t)      ui.runTpmsRecalibration();
+                else if (e.key.keysym.sym == SDLK_n) {
                     ui.setNightMode(!ui.isNightMode());
-                    printf("[NIGHT MODE] Toggled: %s\n", ui.isNightMode() ? "ON (Amber Night Vision)" : "OFF (Daytime White)");
+                    printf("[NIGHT MODE] Toggled: %s\n", ui.isNightMode() ? "ON (Night Mode)" : "OFF (Daytime)");
                     fflush(stdout);
                 }
             } else if (e.type == SDL_MOUSEBUTTONDOWN) {

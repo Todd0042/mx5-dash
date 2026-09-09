@@ -31,7 +31,13 @@ static char sWheelDid[4][8] = {"", "", "", ""}; // FL,FR,RL,RR -> DID hex string
 void UserPrefs::loadAll() {
 #ifdef ARDUINO
     prefs.begin(NS, true);  // read-only
-    sRotation   = prefs.getUChar("rotation",   MX5_LCD_ROTATION);
+    sRotation   = prefs.getUChar("rotation", 3);
+    if (sRotation != 3) {
+        sRotation = 3; // Enforce flipped orientation (USB cable on target side)
+        prefs.end();
+        saveRotation(3);
+        prefs.begin(NS, true);
+    }
     sUnits      = prefs.getBool("units_us",    MX5_UNITS_US);
     sThemeMode  = prefs.getUChar("theme_mode", 0);
     sBrightness = prefs.getUChar("brightness", 95);
@@ -41,13 +47,20 @@ void UserPrefs::loadAll() {
 
     // getString with 3-arg form; apply default if key missing/empty
     size_t n = prefs.getString("ble_prefix", sBlePrefix, sizeof(sBlePrefix));
-    if (n == 0 || sBlePrefix[0] == '\0') {
+    if (n == 0 || sBlePrefix[0] == '\0' || strcasecmp(sBlePrefix, "vLinker") == 0) {
         strncpy(sBlePrefix, MX5_BLE_DEVICE_PREFIX, sizeof(sBlePrefix) - 1);
     }
     sBleScanTimeout = prefs.getUShort("ble_scan_tmo", 5000);
 
     prefs.getString("paired_mac", sPairedMac, sizeof(sPairedMac));
     prefs.getString("paired_name", sPairedName, sizeof(sPairedName));
+    if (strcasecmp(sPairedMac, "07:0a:71:97:28:bb") == 0 ||
+        strcasecmp(sPairedMac, "f4:12:a9:18:be:c9") == 0) {
+        sPairedMac[0] = '\0';
+        sPairedName[0] = '\0';
+        prefs.remove("paired_mac");
+        prefs.remove("paired_name");
+    }
 
     sConfigured  = prefs.getBool("is_configured", false);
     sTpmsEnabled = prefs.getBool("tpms_enabled", (MX5_TPMS_ENABLED != 0));
@@ -57,6 +70,7 @@ void UserPrefs::loadAll() {
         prefs.getString(key, sWheelDid[w], sizeof(sWheelDid[w]));
     }
     prefs.end();
+
     Serial.printf("[prefs] loaded: rot=%d units=%d theme=%d bri=%d ble='%s' mac='%s' configured=%d\n",
                   sRotation, sUnits, sThemeMode, sBrightness, sBlePrefix, sPairedMac, sConfigured);
 #endif
@@ -222,6 +236,22 @@ void UserPrefs::saveConfigured(bool configured) {
 #ifdef ARDUINO
     prefs.begin(NS, false);
     prefs.putBool("is_configured", configured);
+    prefs.end();
+#endif
+}
+
+void UserPrefs::resetToSetupWizard() {
+    sConfigured = false;
+    sPairedMac[0] = '\0';
+    sPairedName[0] = '\0';
+    strncpy(sBlePrefix, MX5_BLE_DEVICE_PREFIX, sizeof(sBlePrefix) - 1);
+    sBlePrefix[sizeof(sBlePrefix) - 1] = '\0';
+#ifdef ARDUINO
+    prefs.begin(NS, false);
+    prefs.putBool("is_configured", false);
+    prefs.remove("paired_mac");
+    prefs.remove("paired_name");
+    prefs.putString("ble_prefix", MX5_BLE_DEVICE_PREFIX);
     prefs.end();
 #endif
 }

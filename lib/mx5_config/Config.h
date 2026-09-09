@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 // Hardware & Display Settings (ESP32-S3 + Waveshare 3.5" 480x320)
 // ---------------------------------------------------------------------------
-#define MX5_LCD_ROTATION 1                       // 1 = 90 deg CW (USB Left), 3 = 270 deg CW (USB Right)
+#define MX5_LCD_ROTATION 3                       // 3 = 270 deg CW (USB Left), 1 = 90 deg CW (USB Right)
 #define MX5_DISPLAY_SELFTEST 0                   // 1 = blink R/G/B during display.begin() (bring-up diag only)
 #define MX5_UNITS_US     1                       // 1 = US (MPH / °F / PSI), 0 = Metric (km/h / °C / bar)
 #define MX5_HOR_RES      480
@@ -32,7 +32,7 @@
 // (e.g. "vLinker", "V-LINK", "OBDII") and auto-connects to its GATT serial
 // service. Once connected, it communicates via ELM327 ASCII protocol.
 // ---------------------------------------------------------------------------
-#define MX5_BLE_DEVICE_PREFIX "vLinker"          // Matches "vLinker MS ...", "vLinker MC ...", etc.
+#define MX5_BLE_DEVICE_PREFIX "OBDLink"          // Matches "OBDLink CX ...", "OBDLink MX ...", etc.
 
 // ---------------------------------------------------------------------------
 // TPMS (Mode 22 manufacturer PIDs, MS-CAN). The 2022 MX-5 ND2 SkyActiv-G

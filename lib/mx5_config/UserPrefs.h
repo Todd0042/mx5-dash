@@ -46,6 +46,7 @@ public:
     // is_configured: false (default/missing) on first boot => run 4-step wizard.
     static void saveConfigured(bool configured);
     static bool isConfigured();
+    static void resetToSetupWizard();
 
     // Active TPMS checks on/off (mirrors MX5_TPMS_ENABLED at runtime).
     static void saveTpmsEnabled(bool enabled);

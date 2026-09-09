@@ -87,6 +87,9 @@ private:
     static void pollTick(Impl& i, uint32_t now);   // rotates through PID cadences
     static void executeNextBackgroundQuery(Impl& i, uint32_t now, uint8_t screen, uint8_t step);
     static void pollTpms(Impl& i, uint32_t now);   // Mode 22 (see Config.h)
+    static void pollTpmsCorner(Impl& i, uint8_t corner, const char* pressureDid,
+                               const char* tempDid); // 1-byte TPMS DIDs on header 720
+    static void applyFuelSample(Impl& i, uint8_t raw);   // 30s rolling fuel average
     static void pollCalibration(Impl& i, uint32_t now); // raw DID capture
 
     Impl* impl_ = nullptr;

@@ -35,7 +35,7 @@ public:
     const char* adapterVersion() const { return adapterVersion_; }
     const char* namePrefix() const { return namePrefix_; }
     int8_t rssi() const { return (pClient_ && pClient_->isConnected()) ? pClient_->getRssi() : 0; }
-    const char* connectedDeviceName() const { return targetDevice_ ? targetDevice_->getName().c_str() : ""; }
+    const char* connectedDeviceName() const { return pairedName_[0] ? pairedName_ : (hasTarget_ ? targetAddress_.toString().c_str() : ""); }
 
     // Runtime config (changes take effect on next reconnect)
     void setNamePrefix(const char* prefix) { namePrefix_ = prefix; }
@@ -98,7 +98,14 @@ private:
 
     const char* namePrefix_ = "vLinker";
     BleElmScanCallbacks* scanCbs_ = nullptr;
-    NimBLEAdvertisedDevice* targetDevice_ = nullptr;
+    NimBLEAddress targetAddress_ = NimBLEAddress("");
+    NimBLEAdvertisedDevice targetAdvDevice_;
+    bool hasTarget_ = false;
+    // True when the current target was matched by its NAME / MAC OUI / service
+    // UUID (i.e. it really is an OBD adapter). A data-path handshake failure on
+    // such a device must NOT blacklist it (it's likely our adapter, transiently
+    // failing); blacklisting is reserved for probes of unnamed near-field junk.
+    bool targetConfirmedOBD_ = false;
     NimBLEClient* pClient_ = nullptr;
     NimBLERemoteCharacteristic* pWriteChar_ = nullptr;
     NimBLERemoteCharacteristic* pNotifyChar_ = nullptr;
@@ -124,6 +131,12 @@ private:
     char diagBuf_[2048] = "";
     size_t diagLen_ = 0;
     size_t diagCount_ = 0;
+
+    static constexpr uint8_t MAX_BLACKLIST = 16;
+    char blacklistedMacs_[MAX_BLACKLIST][20] = {};
+    uint8_t blacklistedCount_ = 0;
+    bool isBlacklisted(const char* mac) const;
+    void addBlacklist(const char* mac);
 
     static RingbufHandle_t ringBuf_;
 };

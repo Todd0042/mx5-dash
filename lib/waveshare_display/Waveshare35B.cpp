@@ -305,8 +305,12 @@ void Waveshare35B::my_disp_flush(lv_display_t* disp, const lv_area_t* area, uint
 
     if (isModelB_) {
         // AXS15231B hardware panel is native 320x480 portrait and cannot do hardware rotation.
-        // Waveshare's dedicated draw16bitBeRGBBitmapR1 rotates the 480x320 buffer on-the-fly via DMA.
-        gfx->draw16bitBeRGBBitmapR1(0, 0, (uint16_t*)px_map, WIDTH, HEIGHT);
+        // On-the-fly QSPI rotation: R1 = USB Left, R3 = USB Right.
+        if (currentLcdRotation == 3) {
+            gfx->draw16bitBeRGBBitmapR3(0, 0, (uint16_t*)px_map, WIDTH, HEIGHT);
+        } else {
+            gfx->draw16bitBeRGBBitmapR1(0, 0, (uint16_t*)px_map, WIDTH, HEIGHT);
+        }
     } else {
         // ST7796 is fed the LVGL pixel buffer. With LV_COLOR_16_SWAP=1 that buffer holds
         // byte-swapped (Big Endian wire order) RGB565, so we MUST use the BE-aware draw call.
