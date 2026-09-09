@@ -29,9 +29,12 @@ fi
 PORT="${PORTS[0]}"
 echo "[+] Target port: $PORT"
 
+# Allow environment override, defaulting to active esp32s3_touch_lcd_3_5
+ENV="${1:-esp32s3_touch_lcd_3_5}"
+
 echo ""
-echo "[*] Building and uploading firmware to $PORT..."
-$PIO run -e esp32s3_touch_lcd_3_5b -t upload --upload-port "$PORT"
+echo "[*] Uploading firmware ($ENV) to $PORT..."
+$PIO run -e "$ENV" -t upload --upload-port "$PORT"
 
 echo ""
 echo "========================================================"

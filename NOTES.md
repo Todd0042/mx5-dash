@@ -67,32 +67,25 @@ see `GEMINI.md`.
   Cross-core loop health is reported as `core0 tick age` (3–19 ms) on the BT
   screen and in the scan-done dump.
 
-### vLinker MC+ discovery status (UNRESOLVED — user action pending)
-- Adapter: **vLinker MC+**, in a **running** car on 12 V. Blue LED flashes
-  rapidly while its pairing/advertising window is open (normal).
-- Android Bluetooth settings shows the name **"vLinker MS 08449"** — our
-  `isVLinkerName()` filter already matches that name, so the board will list it
-  the moment it actually advertises.
-- **Our radios have NEVER received a single vLinker packet** across many
-  captures: 60–75 s laptop (bleak) scans, a guaranteed-aligned 40 s capture
-  covering 5 consecutive board scan windows, all in the car cabin next to the
-  adapter. Both radios reliably decode every *other* device in the cabin (Apple
-  004C, 0xfcf1 Google-ish, 0xfeaf trackers `N1GBU`/`NKER5`, ResMed 434468, …
-  — see `/tmp/blescan_laptop*.log`, `/tmp/blescan_board*.log`), so the radios are
-  not the problem.
-- Leading theory: the phone listing is **bond cache**. The MC+ holds a bond from
-  an earlier phone session; like all Vgate units it then **withholds its
-  advertisement from every other scanner**. Forgetting it on the phone only
-  clears the phone side — the **adapter side** must be unbound (long-press the
-  button until the LED changes pattern, per the MC+ manual).
-- **Pending user action:** after *Forget*, press the adapter button and check
-  whether "vLinker MS 08449" re-appears under **Available devices** (live
-  advertisement) or only under **Previously paired** (bond memory). If it is
-  still bound, long-press the MC+ button to unbind it, then re-press to open a
-  fresh pairing window.
-- Once it advertises, the board filter is ready: `isVLinkerName()`, the vLinker
-  128-bit UUID `e7810a71-73ae-499d-8c15-faa9aef0c3f2`, and OBD UUIDs
-  `FFF0`/`FFE0`/`18F0` all remain in `BleElm.cpp`.
+### BLE Discovery & Connectivity Root Causes Resolved (2026-09-08 Session)
+- **Root Cause 1 — ESP32 Controller HCI Duplicate Filtering (`filter_duplicates`)**:
+  - `startScanInternal()` was calling `pScan->setAdvertisedDeviceCallbacks(scanCbs_, false)` with `wantDuplicates = false`.
+  - In NimBLE, `wantDuplicates = false` enables hardware controller duplicate filtering (`filter_duplicates = 1`).
+  - When the vLinker adapter first advertised, its initial `ADV_IND` packet arrived without the local device name (names are delivered in the `SCAN_RSP` scan response packet). `onResult()` evaluated the empty name, returned without adding it to `discoveredDevices_`, and then the ESP32 HCI controller **permanently suppressed all subsequent advertising packets and scan responses** from that adapter MAC! `onResult()` was never called again when the name packet arrived.
+  - **Fix**: Set `wantDuplicates = true` (`pScan->setAdvertisedDeviceCallbacks(scanCbs_, true)`). `BleElm`'s `onResult()` already deduplicates and updates existing entries in `discoveredDevices_`.
+- **Root Cause 2 — False Device Matching & Phone MAC Loops**:
+  - `isVLinkerName()` included broad substring keywords (`car`, `link`, `vr`, `mcu`) which matched cabin Bluetooth devices (such as Android Auto, phone names, or headsets).
+  - Tapping an unnamed/phone entry on the display saved its MAC (`07:0A:71:97:28:BB`) to NVS.
+  - `discoverGatt()` possessed a loose generic fallback loop that matched Google Nearby Share (`0xFEF3`) on the phone, treating it as an OBD service. `BleElm` sent `ATZ\r` to the phone's Nearby Share service, timed out waiting for an ELM prompt (`>`), disconnected, and retried infinitely—preventing the ESP32 from ever connecting to the real vLinker adapter in pairing mode.
+  - **Fix**: Removed ambiguous keywords (`car`, `link`, `vr`, `mcu`) from `isVLinkerName()` and eliminated the generic fallback loop from `discoverGatt()`, strictly requiring recognized OBD service UUIDs (`e781...`, `FFF0`, `FFE0`, `18F0`). Erased NVS to clear the phone MAC.
+- **Root Cause 3 — MITM Passkey Security Requirement (`mitm = true`)**:
+  - `begin()` called `NimBLEDevice::setSecurityAuth(true, true, true)`.
+  - The second parameter `mitm = true` required Man-In-The-Middle passkey/PIN entry authentication. Headless BLE OBD adapters (vLinker MC+, OBDLink CX, Veepeak) do not have displays or keypads for PIN entry and use "Just Works" pairing. Demanding MITM protection caused security negotiation (SMP) to fail on connection.
+  - **Fix**: Set `NimBLEDevice::setSecurityAuth(true, false, true)` (`mitm = false`) and `NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT)`.
+- **Root Cause 4 — Scan Window Duty Cycle Gap**:
+  - `setInterval(97)` and `setWindow(67)` set 97 ms interval and 67 ms window (arguments in ms in NimBLE).
+  - This left a 30 ms blind gap every 97 ms (~31% radio off-time). OBD adapter advertisements falling in that gap were missed.
+  - **Fix**: Set `setInterval(100)` and `setWindow(99)` for continuous 100% duty cycle active scanning.
 
 ### TEMP diagnostic instrumentation still in place (remove after first connect)
 - `BleElm.cpp`: `begin()` step prints, `loop()` probe print, RX advertising dump

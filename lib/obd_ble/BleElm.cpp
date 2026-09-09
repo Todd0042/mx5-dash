@@ -4,21 +4,29 @@
 #include <strings.h>
 
 // ---------------------------------------------------------------------------
-// vLinker adapter name matcher.
-// Real Vgate adapters advertise under several spellings: "vLinker MC",
-// "V-LINKER", "V_LINKER", "V LINKER", "vLinker MS" etc. Accept any where the
-// letters "v...linker" appear in order with any mix of separator/case.
+// OBD Bluetooth adapter name matcher.
+// Real Vgate / vLinker / OBDLink / Veepeak adapters advertise under several spellings:
+// "vLinker MC", "vLinker MS 08449", "V-LINKER", "Vgate", "OBDLink CX", "VEEPEAK", etc.
 // ---------------------------------------------------------------------------
+static bool containsIgnoreCase(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !*haystack || !*needle) return false;
+    size_t hlen = strlen(haystack);
+    size_t nlen = strlen(needle);
+    if (nlen > hlen) return false;
+    for (size_t i = 0; i <= hlen - nlen; i++) {
+        if (strncasecmp(haystack + i, needle, nlen) == 0) return true;
+    }
+    return false;
+}
+
 static bool isVLinkerName(const char* name) {
     if (!name || !*name) return false;
-    const char* p = name;
-    while (*p) {
-        if (*p == 'v' || *p == 'V') {
-            const char* q = p + 1;
-            while (*q == ' ' || *q == '-' || *q == '_') q++;
-            if (strncasecmp(q, "linker", 6) == 0) return true;
-        }
-        p++;
+    static const char* keywords[] = {
+        "linker", "vgate", "obd", "elm", "icar", "veepeak",
+        "bimmer", "viecar", "obdlink"
+    };
+    for (const char* kw : keywords) {
+        if (containsIgnoreCase(name, kw)) return true;
     }
     return false;
 }
@@ -95,16 +103,16 @@ public:
         }
         owner_->diagCount_++;
 
-        // Only surface vLinker adapters (or the explicitly paired adapter) in
-        // scan results. vLinker units advertise under many spellings, and some
-        // never broadcast a name at all (iOS manual) - they rely on the GATT
-        // service UUID instead. Accept the standard OBD UUIDs plus Vgate's
-        // proprietary 128-bit serial service so those units are listed too.
+        // Surface OBD adapters (matching name keyword or OBD service UUIDs)
         bool isVLinker   = isVLinkerName(name.c_str());
         bool isObdUuid   = (advertisedDevice->isAdvertisingService(NimBLEUUID("FFF0")) ||
                             advertisedDevice->isAdvertisingService(NimBLEUUID("FFE0")) ||
                             advertisedDevice->isAdvertisingService(NimBLEUUID("18F0")) ||
-                            advertisedDevice->isAdvertisingService(NimBLEUUID("e7810a71-73ae-499d-8c15-faa9aef0c3f2")));
+                            advertisedDevice->isAdvertisingService(NimBLEUUID("E781")) ||
+                            advertisedDevice->isAdvertisingService(NimBLEUUID("e7810a71-73ae-499d-8c15-faa9aef0c3f2")) ||
+                            advertisedDevice->isAdvertisingService(NimBLEUUID("0000fff0-0000-1000-8000-00805f9b34fb")) ||
+                            advertisedDevice->isAdvertisingService(NimBLEUUID("0000ffe0-0000-1000-8000-00805f9b34fb")) ||
+                            advertisedDevice->isAdvertisingService(NimBLEUUID("000018f0-0000-1000-8000-00805f9b34fb")));
         bool isPairedMac = (strlen(owner_->pairedMac_) > 0 &&
                             strcasecmp(owner_->pairedMac_, mac.c_str()) == 0);
         if (!isVLinker && !isObdUuid && !isPairedMac) return;
@@ -114,14 +122,16 @@ public:
         for (uint8_t i = 0; i < owner_->discoveredCount_; i++) {
             if (strcasecmp(owner_->discoveredDevices_[i].mac, mac.c_str()) == 0) {
                 owner_->discoveredDevices_[i].rssi = (int8_t)rssi;
-                if (!name.empty()) strncpy(owner_->discoveredDevices_[i].name, name.c_str(), sizeof(owner_->discoveredDevices_[i].name) - 1);
+                if (!name.empty()) {
+                    strncpy(owner_->discoveredDevices_[i].name, name.c_str(), sizeof(owner_->discoveredDevices_[i].name) - 1);
+                }
                 exists = true;
                 break;
             }
         }
         if (!exists && owner_->discoveredCount_ < BleElm::MAX_DISCOVERED) {
             BleDeviceInfo& d = owner_->discoveredDevices_[owner_->discoveredCount_++];
-            strncpy(d.name, name.empty() ? "vLinker" : name.c_str(), sizeof(d.name) - 1);
+            strncpy(d.name, name.empty() ? "vLinker / OBD2" : name.c_str(), sizeof(d.name) - 1);
             strncpy(d.mac, mac.c_str(), sizeof(d.mac) - 1);
             d.rssi = (int8_t)rssi;
             d.isObdCandidate = true;
@@ -158,8 +168,6 @@ bool BleElm::begin(const char* targetNamePrefix) {
     }
 
     // Persistent scan callback, created exactly once and reused across scans.
-    // This avoids the NimBLE 1.4.x hazard of swapping callback objects while a
-    // discovery window is in flight (which can silently kill result delivery).
     if (!scanCbs_) {
         scanCbs_ = new BleElmScanCallbacks(this, &targetDevice_);
     }
@@ -168,7 +176,8 @@ bool BleElm::begin(const char* targetNamePrefix) {
     NimBLEDevice::init("MX5-Dash");
     Serial.printf("[bleElm] begin step1 init-ok\n");
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);   // Max TX power for car cabin range
-    NimBLEDevice::setSecurityAuth(true, true, true);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    NimBLEDevice::setSecurityAuth(true, false, true); // bonding=true, mitm=false ("Just Works" for headless OBD dongles), sc=true
     NimBLEDevice::setMTU(512);
     Serial.printf("[bleElm] begin step2 config-ok\n");
 
@@ -201,10 +210,10 @@ bool BleElm::startScanInternal(uint32_t durationSec) {
     if (!scanCbs_) return false;
 
     NimBLEScan* pScan = NimBLEDevice::getScan();
-    pScan->setAdvertisedDeviceCallbacks(scanCbs_, false);
+    pScan->setAdvertisedDeviceCallbacks(scanCbs_, true); // wantDuplicates = true (allows SCAN_RSP delivery without HCI controller filtering)
     pScan->setActiveScan(true);
-    pScan->setInterval(97);
-    pScan->setWindow(67);
+    pScan->setInterval(100); // 100 ms interval
+    pScan->setWindow(99);    // 99 ms window (continuous 100% duty cycle)
 
     scanning_ = true;
     lastScanStartMs_ = millis();
@@ -389,20 +398,28 @@ bool BleElm::discoverGatt() {
         Serial.println("[bleElm] no services found");
         return false;
     }
-    Serial.printf("[bleElm] discovered %d services\n", (int)services->size());
+    Serial.printf("[bleElm] discovered %d services:\n", (int)services->size());
+    for (auto* s : *services) {
+        Serial.printf("[bleElm]   GATT svc: %s\n", s->getUUID().toString().c_str());
+    }
 
     // Priority 1: Check known vLinker and OBD serial service UUIDs
     const char* knownServices[] = {
-        "e7810a71-73ae-499d-8c15-faa9aef0c3f2",   // vLinker proprietary
-        "0000fff0-0000-1000-8000-00805f9b34fb",   // Standard FFF0
-        "0000ffe0-0000-1000-8000-00805f9b34fb",   // Standard FFE0
-        "000018f0-0000-1000-8000-00805f9b34fb",   // 18F0
+        "e7810a71-73ae-499d-8c15-faa9aef0c3f2",   // vLinker proprietary 128-bit
+        "0000e781-0000-1000-8000-00805f9b34fb",   // vLinker 16-bit E781 expanded
+        "E781",                                 // vLinker 16-bit E781
+        "0000fff0-0000-1000-8000-00805f9b34fb",   // Standard FFF0 128-bit
+        "FFF0",                                 // Standard FFF0 16-bit
+        "0000ffe0-0000-1000-8000-00805f9b34fb",   // Standard FFE0 128-bit
+        "FFE0",                                 // Standard FFE0 16-bit
+        "000018f0-0000-1000-8000-00805f9b34fb",   // 18F0 128-bit
+        "18F0",                                 // 18F0 16-bit
     };
 
     for (const char* uuidStr : knownServices) {
         NimBLERemoteService* s = pClient_->getService(uuidStr);
         if (s) {
-            Serial.printf("[bleElm] matched known service: %s\n", uuidStr);
+            Serial.printf("[bleElm] matched known OBD service: %s\n", uuidStr);
             auto* chars = s->getCharacteristics(true);
             if (chars) {
                 for (auto* c : *chars) {
@@ -414,26 +431,8 @@ bool BleElm::discoverGatt() {
         }
     }
 
-    // Priority 2: Generic fallback - find any service with Write + Notify
     if (!pWriteChar_ || !pNotifyChar_) {
-        for (auto* s : *services) {
-            auto* chars = s->getCharacteristics(true);
-            if (chars) {
-                for (auto* c : *chars) {
-                    if (!pWriteChar_ && (c->canWrite() || c->canWriteNoResponse())) pWriteChar_ = c;
-                    if (!pNotifyChar_ && (c->canNotify() || c->canIndicate())) pNotifyChar_ = c;
-                }
-            }
-            if (pWriteChar_ && pNotifyChar_) {
-                Serial.printf("[bleElm] found generic write/notify chars in service: %s\n",
-                              s->getUUID().toString().c_str());
-                break;
-            }
-        }
-    }
-
-    if (!pWriteChar_ || !pNotifyChar_) {
-        Serial.println("[bleElm] ERROR: could not find valid Write and Notify characteristics");
+        Serial.println("[bleElm] ERROR: Connected device does not expose any recognized OBD GATT service UUIDs");
         return false;
     }
 
@@ -441,7 +440,8 @@ bool BleElm::discoverGatt() {
                   pWriteChar_->getUUID().toString().c_str(),
                   pNotifyChar_->getUUID().toString().c_str());
 
-    if (!pNotifyChar_->subscribe(true, notifyCallback)) {
+    bool useNotify = pNotifyChar_->canNotify();
+    if (!pNotifyChar_->subscribe(useNotify, notifyCallback)) {
         Serial.println("[bleElm] ERROR: subscribe failed");
         return false;
     }
