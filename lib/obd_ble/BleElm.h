@@ -54,6 +54,7 @@ public:
     uint8_t getDiscoveredCount() const { return discoveredCount_; }
     bool getDiscoveredDevice(uint8_t index, BleDeviceInfo& out) const;
     void pairDevice(const char* mac, const char* name);
+    void savePairedDevice(const char* mac, const char* name);   // persist MAC+name, KEEP the live link
     void forgetPairedDevice();
     void getPairedDevice(char* macBuf, size_t macLen, char* nameBuf, size_t nameLen) const;
 
@@ -119,6 +120,9 @@ private:
     uint32_t lastScanEndMs_ = 0;        // waits retryDelayMs_ before next scan
     uint32_t lastConnectAttemptMs_ = 0;
     uint32_t retryDelayMs_ = 2000;
+    uint32_t lastDirectPokeMs_ = 0;      // paired-path direct-address poke cadence
+    uint8_t  directFailures_ = 0;        // consecutive direct-connect failures (paired path)
+    uint32_t connectStartMs_ = 0;        // when the paired connect loop began (forget guard)
 
     char adapterVersion_[32] = "";   // from the ATZ banner
 

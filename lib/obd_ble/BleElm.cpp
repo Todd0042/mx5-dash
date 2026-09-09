@@ -2,8 +2,238 @@
 
 #include <cstring>
 #include <strings.h>
+#include <stdarg.h>
 #include <esp_task_wdt.h>
 #include <esp_mac.h>
+#include <Preferences.h>
+#include <FS.h>
+#include <SPIFFS.h>
+
+// ---------------------------------------------------------------------------
+// Persistent connection log (BT-Tinkering Phase 0).
+//
+// The connection phase can't be watched live from the laptop (it happens in
+// the car). Every [conn] line is mirrored into a RAM ring buffer and flushed
+// to a file on the SPIFFS partition every ~2s, so after a drive the log can be
+// recovered: on the NEXT boot begin() replays the stored file over USB serial
+// (tagged [log-replay]) and then clears it for the new session.
+// ---------------------------------------------------------------------------
+namespace {
+constexpr size_t kLogRingCap = 4096;      // file = most recent ~4KB
+char g_logRing[kLogRingCap];
+size_t g_logRingLen = 0;
+uint32_t g_logFlushMs = 0;
+uint32_t g_logSnapMs = 0;
+uint32_t g_logFileIdx = 0;
+uint32_t g_logConnectedSinceMs = 0;
+bool g_logFsReady = false;
+bool g_logFsMounted = false;
+bool g_logSealed = false;   // true once connection is 5s stable -> writes stop
+
+// SPIFFS is demonstrably NOT crash-safe on this board: the abrupt ACC power-cut
+// in the car left the partition empty on the next boot (even the A/B rotated
+// files were gone). NVS, by contrast, survived every power cut today. So every
+// N seconds we also snapshot the ring into NVS (4 slices x 1024B covers the
+// whole 4096B ring); on boot, if SPIFFS came up empty we replay the snapshot.
+constexpr size_t kLogSnapKeys = 4;
+constexpr size_t kLogSnapSlice = 1024;
+
+static void logSnapKey(char* out, int i) {
+    snprintf(out, 8, "clg%d", i);
+}
+
+// Persist the ring to NVS. Cheap (only the dirty slice bytes) - call on a
+// slow cadence + on state transitions, NOT every 2s flush (NVS wear).
+void logSnapSave() {
+    if (g_logRingLen == 0) return;
+    Preferences p;
+    if (!p.begin("ble_clog", false)) return;
+    for (int i = 0; i < kLogSnapKeys; i++) {
+        char k[8];
+        logSnapKey(k, i);
+        size_t off = (size_t)i * kLogSnapSlice;
+        if (off < g_logRingLen) {
+            size_t n = kLogSnapSlice;
+            if (n > g_logRingLen - off) n = g_logRingLen - off;
+            p.putBytes(k, g_logRing + off, n);
+        } else {
+            p.remove(k);
+        }
+    }
+    p.end();
+}
+
+// Dump the NVS snapshot (if any) to serial, then purge it.
+void logSnapReplay() {
+    bool any = false;
+    {
+        Preferences p;
+        if (!p.begin("ble_clog", true)) return;
+        for (int i = 0; i < kLogSnapKeys; i++) {
+            char k[8];
+            logSnapKey(k, i);
+            size_t len = p.getBytesLength(k);
+            if (len > 0 && len <= kLogSnapSlice) {
+                uint8_t tmp[kLogSnapSlice];
+                size_t got = p.getBytes(k, tmp, sizeof(tmp));
+                if (got > 0) {
+                    if (!any) Serial.println("======== [log-replay] previous session (NVS snapshot) ========");
+                    Serial.write(tmp, got);
+                    any = true;
+                }
+            }
+        }
+        p.end();
+    }
+    if (any) {
+        Preferences p;
+        if (p.begin("ble_clog", false)) {
+            for (int i = 0; i < kLogSnapKeys; i++) {
+                char k[8];
+                logSnapKey(k, i);
+                p.remove(k);
+            }
+            p.end();
+        }
+        Serial.println("======== [log-replay] end ========");
+    }
+}
+
+// Keep the tail of the session: overwrite the oldest bytes once the ring
+// fills (a split line at the wrap point is acceptable for diagnostics).
+void logRingAppend(const char* line, size_t n) {
+    if (n == 0) return;
+    if (g_logRingLen + n + 1 > kLogRingCap) {
+        size_t drop = (g_logRingLen + n + 1) - kLogRingCap;
+        if (drop < g_logRingLen) {
+            memmove(g_logRing, g_logRing + drop, g_logRingLen - drop);
+            g_logRingLen -= drop;
+        } else {
+            g_logRingLen = 0;
+        }
+    }
+    memcpy(g_logRing + g_logRingLen, line, n);
+    g_logRingLen += n;
+    g_logRing[g_logRingLen++] = '\n';
+}
+
+// Write the whole ring out, alternating between /conn.a and /conn.b so an
+// abrupt power cut mid-write can only trash ONE copy; boot-replay reads both.
+// f.flush() forces the SPIFFS write buffers to flash before closing.
+void logFsFlush() {
+    if (!g_logFsReady || g_logRingLen == 0) return;
+    const char* path = (g_logFileIdx++ & 1) ? "/conn.b" : "/conn.a";
+    File f = SPIFFS.open(path, FILE_WRITE);
+    if (f) {
+        f.write((const uint8_t*)g_logRing, g_logRingLen);
+        f.flush();
+        f.close();
+    }
+    g_logFlushMs = millis();
+}
+
+// Mount the FS once. Replay + clear any previous session's log, then leave
+// the FS ready for this session's flushes. Returns true when FS logging works.
+bool logFsBegin() {
+    if (g_logFsMounted) return g_logFsReady;
+    g_logFsMounted = true;
+    bool ok = SPIFFS.begin(true);   // auto-format on very first boot
+    if (!ok) {
+        Serial.println("[conn] WARN: SPIFFS mount failed -> RAM-only logging");
+        return false;
+    }
+    g_logFsReady = true;
+
+    bool spiffsReplayed = false;
+    const char* replayPaths[] = { "/conn.b", "/conn.a" };  // newest written last
+    for (const char* p : replayPaths) {
+        File f = SPIFFS.open(p, FILE_READ);
+        if (f && f.size() > 0) {
+            char ch;
+            spiffsReplayed = true;
+            Serial.printf("======== [log-replay] previous session (%s) ========\n", p);
+            while (f.available()) {
+                ch = (char)f.read();
+                Serial.write((uint8_t)ch);
+            }
+            Serial.println("======== [log-replay] end ========");
+            f.close();
+        } else if (f) {
+            f.close();
+        }
+        SPIFFS.remove(p);
+    }
+    if (!spiffsReplayed) {
+        logSnapReplay();   // SPIFFS empty/absent -> recover the NVS snapshot
+    }
+    return true;
+}
+}  // namespace
+
+// The PIO upload wipes the NVS partition, so the paired-device bond (saved to
+// NVS by UserPrefs) is lost on every firmware flash. Mirror it to SPIFFS too -
+// that partition survives the upload (proven by the conn.log replay) - and on
+// boot restore it back into NVS whenever NVS comes up empty. Structure:
+//   line 1: mac
+//   line 2: name
+static void spifsSavePaired(const char* mac, const char* name) {
+    if (!mac || !mac[0]) return;
+    if (!SPIFFS.begin(true)) return;
+    File f = SPIFFS.open("/paired.txt", FILE_WRITE);
+    if (f) {
+        f.print(mac);
+        f.print('\n');
+        if (name) f.print(name);
+        f.flush();
+        f.close();
+    }
+}
+
+static bool spifsLoadPaired(char* macOut, size_t macLen, char* nameOut, size_t nameLen) {
+    macOut[0] = '\0';
+    if (nameOut && nameLen > 0) nameOut[0] = '\0';
+    if (!SPIFFS.begin(true)) return false;
+    File f = SPIFFS.open("/paired.txt", FILE_READ);
+    if (!f || f.size() == 0) {
+        if (f) f.close();
+        return false;
+    }
+    String mac = f.readStringUntil('\n');
+    String name = f.readStringUntil('\n');
+    f.close();
+    mac.trim();
+    name.trim();
+    if (mac.length() == 0) return false;
+    strncpy(macOut, mac.c_str(), macLen - 1);
+    macOut[macLen - 1] = '\0';
+    if (nameOut && nameLen > 0) {
+        strncpy(nameOut, name.c_str(), nameLen - 1);
+        nameOut[nameLen - 1] = '\0';
+    }
+    return true;
+}
+
+static void spifsClearPaired() {
+    if (SPIFFS.begin(true)) SPIFFS.remove("/paired.txt");
+}
+
+// Connection-phase logging. Every line is tagged [conn] with ms-from-boot so
+// the whole bring-up sequence can be replayed and analyzed from the shell
+// capture. Goes to BOTH the live serial stream AND the persistent file.
+static void connLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+static void connLog(const char* fmt, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    char out[280];
+    int n = snprintf(out, sizeof(out), "[conn] t=%lu %s\n", (unsigned long)millis(), buf);
+    if (n > 0) {
+        Serial.print(out);
+        logRingAppend(out, (size_t)n);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // OBD Bluetooth adapter name matcher.
@@ -64,7 +294,7 @@ public:
     }
 
     void onDisconnect(NimBLEClient* pClient) override {
-        Serial.println("[bleElm] BLE link disconnected");
+        connLog("disconnected");
         if (connected_) *connected_ = false;
         if (initialized_) *initialized_ = false;
     }
@@ -197,11 +427,29 @@ public:
 // ---------------------------------------------------------------------------
 
 bool BleElm::begin(const char* targetNamePrefix) {
+    logFsBegin();   // replay previous session's log if any, then start fresh
+    connLog("begin name=%s", targetNamePrefix ? targetNamePrefix : "OBDLink");
     namePrefix_ = targetNamePrefix ? targetNamePrefix : "OBDLink";
 
-    // Load paired device from NVS preferences
+    // Load paired device from NVS preferences. If NVS came up empty (e.g. it
+    // was just wiped by a firmware flash), fall back to the SPIFFS mirror so
+    // the CX bond survives reflashing without a re-pair.
     UserPrefs::getPairedMac(pairedMac_, sizeof(pairedMac_));
     UserPrefs::getPairedName(pairedName_, sizeof(pairedName_));
+    if (pairedMac_[0] == '\0') {
+        char altMac[24], altName[40];
+        if (spifsLoadPaired(altMac, sizeof(altMac), altName, sizeof(altName))) {
+            strncpy(pairedMac_, altMac, sizeof(pairedMac_) - 1);
+            pairedMac_[sizeof(pairedMac_) - 1] = '\0';
+            strncpy(pairedName_, altName, sizeof(pairedName_) - 1);
+            pairedName_[sizeof(pairedName_) - 1] = '\0';
+            UserPrefs::savePairedMac(pairedMac_);
+            UserPrefs::savePairedName(pairedName_);
+            Serial.printf("[bleElm] restored paired '%s' from SPIFFS mirror\n", pairedMac_);
+        }
+    }
+    connLog("begin paired='%s' name='%s'", pairedMac_[0] ? pairedMac_ : "-",
+            pairedName_[0] ? pairedName_ : "-");
 
     if (!ringBuf_) {
         ringBuf_ = xRingbufferCreate(1024, RINGBUF_TYPE_BYTEBUF);
@@ -212,9 +460,8 @@ bool BleElm::begin(const char* targetNamePrefix) {
         scanCbs_ = new BleElmScanCallbacks(this);
     }
 
-    Serial.printf("[bleElm] begin step0 core=%d\n", xPortGetCoreID());
     NimBLEDevice::init("MX5-Dash");
-    Serial.printf("[bleElm] begin step1 init-ok\n");
+    connLog("nimble-init ok");
     // Do NOT deleteAllBonds() on every boot! The OBDLink CX only accepts new
     // bonding during the first 5 minutes after ITS power-on. Keeping the stored
     // LTK in NVS means later reboots reuse the existing bond instantly instead
@@ -228,9 +475,9 @@ bool BleElm::begin(const char* targetNamePrefix) {
     if (!pClient_) {
         pClient_ = NimBLEDevice::createClient();
         pClient_->setClientCallbacks(new BleElmClientCallbacks(&connected_, &initialized_), true);
-        pClient_->setConnectTimeout(8);
+        pClient_->setConnectTimeout(4);
     }
-    Serial.printf("[bleElm] begin step2 config-ok (pClient=%p)\n", pClient_);
+    connLog("begin-done retry=%lu", (unsigned long)retryDelayMs_);
 
     Serial.printf("[bleElm] initialized BLE subsystem (this=%p, paired MAC: '%s', prefix: '%s')\n",
                   this, pairedMac_, namePrefix_);
@@ -285,10 +532,13 @@ bool BleElm::startScanInternal(uint32_t durationSec) {
 }
 
 void BleElm::onScanCompleteStatic(NimBLEScanResults results) {
-    (void)results;
     if (g_activeScanOwner) {
-        g_activeScanOwner->scanning_ = false;
-        g_activeScanOwner->lastScanEndMs_ = millis();
+        BleElm* owner = g_activeScanOwner;
+        owner->scanning_ = false;
+        owner->lastScanEndMs_ = millis();
+        connLog("scan-end dur=%lu found=%d",
+                (unsigned long)(owner->lastScanEndMs_ - owner->lastScanStartMs_),
+                (int)results.getCount());
         g_activeScanOwner = nullptr;
     }
 }
@@ -297,6 +547,24 @@ bool BleElm::getDiscoveredDevice(uint8_t index, BleDeviceInfo& out) const {
     if (index >= discoveredCount_) return false;
     out = discoveredDevices_[index];
     return true;
+}
+
+void BleElm::savePairedDevice(const char* mac, const char* name) {
+    // Persist the MAC+name WITHOUT tearing down the live connection. Used on
+    // the auto-connect success path: the first-ever connect is already linked
+    // to this exact MAC, so pairDevice()'s teardown-then-retarget would kill
+    // the brand-new bond and force a 2nd full connect cycle.
+    if (!mac) return;
+    strncpy(pairedMac_, mac, sizeof(pairedMac_) - 1);
+    pairedMac_[sizeof(pairedMac_) - 1] = '\0';
+    if (name) {
+        strncpy(pairedName_, name, sizeof(pairedName_) - 1);
+        pairedName_[sizeof(pairedName_) - 1] = '\0';
+    }
+    UserPrefs::savePairedMac(pairedMac_);
+    UserPrefs::savePairedName(pairedName_);
+    spifsSavePaired(pairedMac_, pairedName_);
+    connLog("saved paired device mac=%s name='%s'", pairedMac_, pairedName_);
 }
 
 void BleElm::pairDevice(const char* mac, const char* name) {
@@ -309,6 +577,7 @@ void BleElm::pairDevice(const char* mac, const char* name) {
     }
     UserPrefs::savePairedMac(pairedMac_);
     UserPrefs::savePairedName(pairedName_);
+    spifsSavePaired(pairedMac_, pairedName_);
 
     teardown();
     targetAddress_ = NimBLEAddress(mac);
@@ -319,6 +588,7 @@ void BleElm::forgetPairedDevice() {
     pairedMac_[0] = '\0';
     pairedName_[0] = '\0';
     UserPrefs::clearPairedDevice();
+    spifsClearPaired();
     teardown();
     startScan(5);
 }
@@ -337,6 +607,35 @@ void BleElm::getPairedDevice(char* macBuf, size_t macLen, char* nameBuf, size_t 
 void BleElm::loop() {
     if (!initReady_) return;               // begin() not finished yet
     uint32_t now = millis();
+
+    // Phase 0: flag any >500ms gap between loop ticks while trying to connect.
+    // connectToDevice()'s internal delays/timeouts are serialized here, so the
+    // gap quantifies how long each attempt actually blocks the task.
+    static uint32_t s_prevLoop = 0;
+    if (s_prevLoop && (now - s_prevLoop > 500)) {
+        connLog("loop-gap=%lu", (unsigned long)(now - s_prevLoop));
+    }
+    s_prevLoop = now;
+
+    // Phase 0: persist the ring while in the CONNECT phase only. Once the link has
+    // been stable for 5s the session is "sealed": the connect story is written,
+    // and all flash/NVS writes stop so an abrupt ACC power-cut can never strike
+    // mid-write (that mid-write cut was corrupting SPIFFS and losing sessions).
+    if (g_logFsReady && !g_logSealed && (now - g_logFlushMs >= 2000)) {
+        logFsFlush();
+    }
+    if (!g_logSealed && connected_ && (now - g_logConnectedSinceMs >= 5000)) {
+        connLog("session sealed (link stable 5s)");
+        g_logSealed = true;
+        logFsFlush();
+        logSnapSave();
+        g_logFlushMs = now;
+        g_logSnapMs = now;
+    }
+    if (!g_logSealed && (now - g_logSnapMs >= 30000)) {
+        logSnapSave();
+        g_logSnapMs = now;
+    }
 
     // TEMP DIAGNOSTIC: explain why auto-scan is not starting
     static uint32_t s_lastProbe = 0;
@@ -361,29 +660,53 @@ void BleElm::loop() {
             stopScan();
         }
 
-        // Start a new scan only when none is active AND the quiet period since
-        // the previous scan actually ENDED has elapsed. Scanning for 5s, then
-        // idling retryDelayMs_, gives every advertiser plenty of windows.
         if (!hasTarget_) {
-            // The known adapter may not be visible to the scan (directed
-            // advertising / already-bonded behavior). Poke it by MAC address
-            // periodically so it re-opens a connection. Uses the paired MAC
-            // when available, else the hardcoded known-adapter fallback.
-            const char* macToPoke = pairedMac_[0] ? pairedMac_ : g_forcedAdapterMac;
+            const bool hasPaired = pairedMac_[0] != '\0';
+
+            if (hasPaired) {
+                // ---- PAIRED: DIRECT-FIRST, no discovery scan on the hot path.
+                // A bonded CX fast-blinking is directed-advertising to its bond
+                // and does NOT undirected-advertise, so a scan almost never
+                // surfaces it. Poke it straight by MAC on a short cadence
+                // instead of burning a 5s scan + quiet period before connect.
+                if (connectStartMs_ == 0) connectStartMs_ = now;
+                if (!scanning_ && (now - lastDirectPokeMs_ >= 1500)) {
+                    lastDirectPokeMs_ = now;
+                    connLog("direct-poke mac=%s fails=%u", pairedMac_, (unsigned)directFailures_);
+                    targetAddress_ = NimBLEAddress(pairedMac_);
+                    targetConfirmedOBD_ = true;
+                    hasTarget_ = true;
+                    return;
+                }
+                // Safety net: if the direct path keeps failing, take a short
+                // scan pass (covers a CX that lost ITS bond and is back to
+                // undirected advertising). Resume direct pokes afterwards.
+                if (!scanning_ && directFailures_ >= 3 &&
+                    (now - lastScanEndMs_ >= retryDelayMs_)) {
+                    connLog("scan-fallback after %u direct failures (3s pass)", (unsigned)directFailures_);
+                    if (!startScanInternal(3)) lastScanEndMs_ = now;
+                    return;
+                }
+                return;
+            }
+
+            // ---- UNPAIRED: discovery scan is the primary path. Poke the
+            // known CX MAC as a fallback once a quiet period + gate expire
+            // (first-ever pairing / NVS cleared).
+            const char* macToPoke = g_forcedAdapterMac;
             if (macToPoke[0] && !scanning_ &&
                 (now - lastScanEndMs_ >= retryDelayMs_) &&
                 (now - g_lastForcedMacAttemptMs >= 5000)) {
                 g_lastForcedMacAttemptMs = now;
-                Serial.printf("[bleElm] scan has not surfaced known OBD adapter (%s) -> forcing direct-address connect\n", macToPoke);
+                connLog("direct-poke (unpaired fallback) mac=%s", macToPoke);
                 targetAddress_ = NimBLEAddress(macToPoke);
                 targetConfirmedOBD_ = true;
                 hasTarget_ = true;
                 return;
             }
             if (!scanning_ && (now - lastScanEndMs_ >= retryDelayMs_)) {
-                Serial.printf("[bleElm] starting BLE scan (paired MAC: '%s', prefix: '%s')...\n", pairedMac_, namePrefix_);
+                connLog("scan-start (unpaired) dur=5s target='%s'", namePrefix_);
                 if (!startScanInternal(5)) {
-                    // Stack not synced yet etc.: back off briefly and retry.
                     lastScanEndMs_ = now;
                 }
             }
@@ -404,12 +727,18 @@ void BleElm::loop() {
                     connected_ = true;
                     initialized_ = true;
                     retryDelayMs_ = 2000;
+                    directFailures_ = 0;
+                    connectStartMs_ = 0;
                     if (strlen(pairedMac_) == 0 && hasTarget_) {
                         std::string targetMac = targetAddress_.toString();
                         std::string targetName = targetAdvDevice_.getName();
-                        pairDevice(targetMac.c_str(), targetName.empty() ? "OBDLink CX" : targetName.c_str());
+                        savePairedDevice(targetMac.c_str(), targetName.empty() ? "OBDLink CX" : targetName.c_str());
                     }
-                    Serial.println("[bleElm] adapter fully ready for live telemetry");
+                    connLog("READY data-path up");
+                    g_logConnectedSinceMs = now;
+                    g_logSealed = false;   // re-arm seal() for this link
+                    logFsFlush();
+                    logSnapSave();
                     return;
                 }
                 Serial.println("[bleElm] GATT/ELM init failed, retrying...");
@@ -422,15 +751,16 @@ void BleElm::loop() {
                 if (strlen(pairedMac_) == 0 && !targetConfirmedOBD_) {
                     addBlacklist(targetAddress_.toString().c_str());
                 }
-                static uint8_t failCount = 0;
-                failCount++;
-                if (failCount >= 2 && strlen(pairedMac_) > 0) {
-                    Serial.printf("[bleElm] Paired MAC '%s' failed %d times -> forgetting paired MAC to auto-scan fresh\n", pairedMac_, failCount);
-                    forgetPairedDevice();
-                    failCount = 0;
-                } else {
-                    teardown();
-                }
+                directFailures_++;
+                // NO auto-forget. The scan-fallback below (>=3 direct fails
+                // -> 3s discovery pass) already recovers a replaced/new CX by
+                // name and re-pairs on success. Auto-forgetting instead burned
+                // a perfectly good bond on every bench boot where the CX is
+                // simply OFF (nothing distinguishable from "gone"), forcing a
+                // full slow re-pair on the next car trip. Forever-poke a stale
+                // MAC + periodic scan passes is harmless; losing the bond is
+                // not.
+                teardown();
                 retryDelayMs_ = 2000;
             }
         }
@@ -446,6 +776,7 @@ void BleElm::loop() {
 
 bool BleElm::connectToDevice() {
     if (!hasTarget_) return false;
+    uint32_t ccStart = millis();
 
     // Give BLE host stack time to settle after stopping scan
     NimBLEScan* pScan = NimBLEDevice::getScan();
@@ -461,12 +792,14 @@ bool BleElm::connectToDevice() {
         targetAddress_,
         NimBLEAddress(targetAddress_.toString(), (targetAddress_.getType() == BLE_ADDR_PUBLIC) ? BLE_ADDR_RANDOM : BLE_ADDR_PUBLIC)
     };
+    connLog("connect-attempt mac=%s (hasAdv=%d)", targetAddress_.toString().c_str(),
+            (targetAdvDevice_.getAddress() != NimBLEAddress("00:00:00:00:00:00")) ? 1 : 0);
 
     bool ok = false;
     if (!pClient_) {
         pClient_ = NimBLEDevice::createClient();
         pClient_->setClientCallbacks(new BleElmClientCallbacks(&connected_, &initialized_), true);
-        pClient_->setConnectTimeout(8);
+        pClient_->setConnectTimeout(4);
 #if CONFIG_BT_NIMBLE_EXT_ADV
         pClient_->setConnectPhy(BLE_GAP_LE_PHY_1M_MASK);
 #endif
@@ -489,37 +822,46 @@ bool BleElm::connectToDevice() {
         esp_task_wdt_reset();
         ok = pClient_->connect(&targetAdvDevice_, true);
         esp_task_wdt_reset();
+        connLog("connect adv-device -> %d elapsed=%lu", ok ? 1 : 0,
+                (unsigned long)(millis() - ccStart));
     } else {
-        Serial.println("[bleElm] connecting using forced target address (no advertised device captured)...");
+        connLog("forced address path (no advertised device captured)");
         ok = false;
     }
 
     if (!ok) {
-        Serial.printf("[bleElm] connect(&targetAdvDevice_) failed (last error=%d), trying fallback address types...\n",
-                      pClient_->getLastError());
-        for (int i = 0; i < 2; i++) {
+        // A confirmed OBD device with a PUBLIC address (the OBDLink CX) only
+        // ever answers on that one type - the RANDOM retry is a guaranteed 8s
+        // timeout. Skip it to halve outage cost.
+        int addrCount = (targetConfirmedOBD_ && addrList[0].getType() == BLE_ADDR_PUBLIC) ? 1 : 2;
+        for (int i = 0; i < addrCount; i++) {
             NimBLEAddress currentAddr = addrList[i];
             Serial.printf("[bleElm] connecting to fallback target %s (type=%d)...\n",
                           currentAddr.toString().c_str(), currentAddr.getType());
+            uint32_t addrStart = millis();
             esp_task_wdt_reset();
             ok = pClient_->connect(currentAddr, true);
             esp_task_wdt_reset();
+            connLog("connect addr[%d]=%s type=%d -> %d elapsed=%lu err=%d%s",
+                    i, currentAddr.toString().c_str(), currentAddr.getType(), ok ? 1 : 0,
+                    (unsigned long)(millis() - addrStart), pClient_->getLastError(),
+                    ok ? "" : "");
             if (ok) {
                 targetAddress_ = currentAddr;
                 break;
             }
-            Serial.printf("[bleElm] fallback connect failed for type %d (last error=%d)\n",
-                          currentAddr.getType(), pClient_->getLastError());
             delay(300);
         }
     }
 
     if (!ok) {
+        connLog("connect FAILED all address types elapsed=%lu",
+                (unsigned long)(millis() - ccStart));
         Serial.println("[bleElm] connect() failed on all address types");
         return false;
     }
 
-    Serial.println("[bleElm] physical connect OK");
+    connLog("phys-connect ok elapsed=%lu", (unsigned long)(millis() - ccStart));
     // Request fast connection parameters (7.5ms min, 15ms max) for low latency
     pClient_->setConnectionParams(6, 12, 0, 100);
     delay(50);
@@ -531,39 +873,31 @@ bool BleElm::connectToDevice() {
     uint32_t secStart = millis();
     while (millis() - secStart < 2500) {
         if (g_securityAuthComplete || pClient_->getConnInfo().isEncrypted()) {
-            Serial.printf("[bleElm] BLE link secured & encrypted in %lu ms\n", (unsigned long)(millis() - secStart));
+            connLog("link secured+encrypted elapsed=%lu", (unsigned long)(millis() - secStart));
             break;
         }
         delay(50);
     }
     delay(200);
+    connLog("connectToDevice done elapsed=%lu", (unsigned long)(millis() - ccStart));
     return true;
 }
 
 bool BleElm::discoverGatt() {
     if (!pClient_ || !pClient_->isConnected()) return false;
+    uint32_t gattStart = millis();
 
     pWriteChar_ = nullptr;
     pNotifyChar_ = nullptr;
 
     auto* services = pClient_->getServices(true);
     if (!services || services->empty()) {
+        connLog("gatt no-services elapsed=%lu", (unsigned long)(millis() - gattStart));
         Serial.println("[bleElm] no services found or connection dropped");
         return false;
     }
-    Serial.printf("[bleElm] discovered %d services:\n", (int)services->size());
-    for (auto* s : *services) {
-        Serial.printf("[bleElm]   GATT svc: %s\n", s->getUUID().toString().c_str());
-        auto* chars = s->getCharacteristics(true);
-        if (chars) {
-            for (auto* c : *chars) {
-                Serial.printf("[bleElm]     char: %s [write=%d, writeNoResp=%d, notify=%d, indicate=%d]\n",
-                              c->getUUID().toString().c_str(),
-                              c->canWrite() ? 1 : 0, c->canWriteNoResponse() ? 1 : 0,
-                              c->canNotify() ? 1 : 0, c->canIndicate() ? 1 : 0);
-            }
-        }
-    }
+    connLog("gatt services=%d elapsed=%lu", (int)services->size(),
+            (unsigned long)(millis() - gattStart));
 
     // Priority 1: Check standard FFF0 / E781 / FFE0 OBD serial service UUIDs
     const char* knownServices[] = {
@@ -598,9 +932,10 @@ bool BleElm::discoverGatt() {
         return false;
     }
 
-    Serial.printf("[bleElm] write char: %s, notify char: %s\n",
-                  pWriteChar_->getUUID().toString().c_str(),
-                  pNotifyChar_->getUUID().toString().c_str());
+    connLog("gatt chars w=%s n=%s elapsed=%lu",
+            pWriteChar_ ? pWriteChar_->getUUID().toString().c_str() : "?",
+            pNotifyChar_ ? pNotifyChar_->getUUID().toString().c_str() : "?",
+            (unsigned long)(millis() - gattStart));
 
     bool useNotify = pNotifyChar_->canNotify();
     // Force CCCD write WITH response. The OBDLink CX is "always encrypted" and
@@ -608,15 +943,21 @@ bool BleElm::discoverGatt() {
     // reports success either way since it can't detect a fire-and-forget
     // failure. Use the (response=true) overload, then read the CCCD back to
     // confirm the peripheral actually enabled notifications.
+    uint32_t subStart = millis();
     if (!pNotifyChar_->subscribe(useNotify, notifyCallback, true)) {
+        connLog("subscribe FAILED elapsed=%lu", (unsigned long)(millis() - subStart));
         Serial.println("[bleElm] ERROR: subscribe failed");
         return false;
     }
     NimBLERemoteDescriptor* cccd = pNotifyChar_->getDescriptor(NimBLEUUID((uint16_t)0x2902));
+    uint16_t cccdVal = 0;
     if (cccd) {
-        uint16_t v = cccd->readValue<uint16_t>();
-        Serial.printf("[bleElm] CCCD readback = 0x%04x (expected 0x0001 for notify)\n", v);
+        cccdVal = cccd->readValue<uint16_t>();
+        connLog("subscribed cccd=0x%04x elapsed=%lu (wrote with response)",
+                cccdVal, (unsigned long)(millis() - subStart));
     } else {
+        connLog("NO CCCD descriptor on notify char elapsed=%lu",
+                (unsigned long)(millis() - subStart));
         Serial.println("[bleElm] WARN: no CCCD descriptor on notify char!");
     }
 
@@ -631,6 +972,7 @@ void BleElm::notifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, s
 
 bool BleElm::initAdapter() {
     char resp[MAX_RESPONSE];
+    uint32_t elmStart = millis();
 
     // Give BLE notifications time to settle, wake up chip with CR, then clear buffer
     delay(250);
@@ -640,38 +982,42 @@ bool BleElm::initAdapter() {
 
     // ELM327 initialization commands. ATZ must run FIRST!
     const char* cmds[] = {
-        "AT\r",           // 0: Ping adapter -> wake up STN/ELM chip
-        "ATZ\r",          // 1: Reset -> returns adapter banner
-        "ATE0\r",         // 2: Echo off
-        "ATL0\r",         // 3: Linefeeds off
-        "ATS0\r",         // 4: Spaces off
-        "ATH0\r",         // 5: Headers off
-        "ATAT2\r",        // 6: Adaptive timing mode 2
-        "ATST32\r",       // 7: Adapter timeout 200ms
-        "ATSP6\r",        // 8: Protocol 6 = ISO 15765-4 CAN 11-bit/500k
-        "ATSH 7E0\r",     // 9: Default to PCM CAN Header 7E0
+        "ATZ\r",          // 0: Reset -> wakes the STN chip AND returns adapter banner
+        "ATE0\r",         // 1: Echo off
+        "ATL0\r",         // 2: Linefeeds off
+        "ATS0\r",         // 3: Spaces off
+        "ATH0\r",         // 4: Headers off
+        "ATAT2\r",        // 5: Adaptive timing mode 2
+        "ATST32\r",       // 6: Adapter timeout 200ms
+        "ATSP6\r",        // 7: Protocol 6 = ISO 15765-4 CAN 11-bit/500k
+        "ATSH 7E0\r",     // 8: Default to PCM CAN Header 7E0
     };
 
     for (unsigned i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         bool ok = false;
+        int retries = 0;
         for (int retry = 0; retry < 2; retry++) {
             if (sendCommand(cmds[i]) && readResponse(resp, sizeof(resp), 1500)) {
-                Serial.printf("[bleElm] RX resp for '%s': '%s'\n", cmds[i], resp);
                 ok = true;
                 break;
             }
+            retries++;
             Serial.printf("[bleElm] retry %d for '%s'...\n", retry + 1, cmds[i]);
             sendCommand("\r");
             delay(150);
             flush();
         }
+        connLog("elm '%s' -> %s retries=%d elapsed=%lu", cmds[i], ok ? "ok" : "FAIL",
+                retries, (unsigned long)(millis() - elmStart));
 
         if (!ok) {
+            connLog("elm INIT ABORTED at '%s' elapsed=%lu",
+                    cmds[i], (unsigned long)(millis() - elmStart));
             Serial.printf("[bleElm] failed/timeout initializing '%s'\n", cmds[i]);
             return false;
         }
 
-        if (i == 1) {
+        if (i == 0) {
             // Store the adapter version banner from ATZ
             strncpy(adapterVersion_, resp, sizeof(adapterVersion_) - 1);
             adapterVersion_[sizeof(adapterVersion_) - 1] = '\0';
@@ -680,10 +1026,15 @@ bool BleElm::initAdapter() {
     }
 
     flush();
+    connLog("elm init complete elapsed=%lu", (unsigned long)(millis() - elmStart));
     return true;
 }
 
 void BleElm::teardown() {
+    connLog("teardown");
+    g_logSealed = false;   // new connect attempt must log again
+    logFsFlush();
+    logSnapSave();
     stopScan();   // never leave the controller mid-discovery while tearing down
 
     if (pNotifyChar_) {
