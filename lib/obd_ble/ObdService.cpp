@@ -30,6 +30,9 @@ struct ObdService::Impl {
     uint32_t lastOilMs = 0;
     uint32_t pollErrors = 0;     // consecutive failed reads
 
+    uint16_t engineTorqueRefNm = 250;   // 01 63 flywheel reference; MX-5 constant 250
+    bool     refTorqueRead = false;     // 01 63 polled once (static on ND)
+
     uint32_t accelStartMs = 0;
     uint8_t  prevSpeedKmh = 0;
     uint32_t prevSpeedMs = 0;
@@ -470,6 +473,86 @@ void ObdService::applyFuelSample(Impl& i, uint8_t raw) {
 }
 
 // ---------------------------------------------------------------------------
+// Mode 03 (stored) / Mode 07 (pending) DTC decoder
+// ---------------------------------------------------------------------------
+
+// Reads one hex byte (2 characters) from a space-less ELM response.
+static bool readHexByte(const char*& p, uint8_t& out) {
+    auto nib = [](char c) -> int8_t {
+        if (c >= '0' && c <= '9') return (int8_t)(c - '0');
+        if (c >= 'A' && c <= 'F') return (int8_t)(c - 'A' + 10);
+        if (c >= 'a' && c <= 'f') return (int8_t)(c - 'a' + 10);
+        return -1;
+    };
+    if (p[0] == '\0' || p[1] == '\0') return false;
+    int8_t hi = nib(p[0]);
+    int8_t lo = nib(p[1]);
+    if (hi < 0 || lo < 0) return false;
+    out = (uint8_t)((hi << 4) | lo);
+    p += 2;
+    return true;
+}
+
+// Decodes Mode 03/07 frames ("43"/"47" + count + DTC pairs) from the full
+// ELM response (may contain several ECU frames). Results are deduped into dst.
+// SAE J2012 2-byte format: letter="PCBU"[b1>>6], digits from b1/b1 nibbles.
+static void parseDtcCodes(const char* resp, const char* prefix, char dst[][8],
+                          uint8_t& n, uint8_t maxN) {
+    const size_t plen = strlen(prefix);
+    const char* scan = resp;
+    while ((scan = strstr(scan, prefix)) != nullptr) {
+        const char* p = scan + plen;
+        uint8_t cnt = 0;
+        if (!readHexByte(p, cnt)) { scan = p; continue; }
+        if (cnt != 0) {
+            // Some ECUs duplicate the count byte (43 NN NN ...) - drop it
+            const char* peek = p;
+            uint8_t dup = 0;
+            if (readHexByte(peek, dup) && dup == cnt) p = peek;
+            char code[8];
+            for (uint8_t k = 0; k < cnt; k++) {
+                uint8_t b1 = 0, b2 = 0;
+                if (!readHexByte(p, b1) || !readHexByte(p, b2)) break;
+                snprintf(code, sizeof(code), "%c%X%X%X%X", "PCBU"[(b1 >> 6) & 3],
+                         (b1 >> 4) & 3, b1 & 0xF, b2 >> 4, b2 & 0xF);
+                if (strcmp(code, "P0000") == 0) continue;
+                bool dupCode = false;
+                for (uint8_t d = 0; d < n; d++) {
+                    if (strcmp(dst[d], code) == 0) { dupCode = true; break; }
+                }
+                if (!dupCode && n < maxN) {
+                    strcpy(dst[n], code);
+                    n++;
+                }
+            }
+        }
+        scan = p;
+    }
+}
+
+void ObdService::pollDtcCodes(Impl& i) {
+    char resp[BleElm::MAX_RESPONSE];
+    char list[8][8] = {};
+    uint8_t n = 0;
+    const uint8_t kMax = sizeof(i.data.dtcCodes) / sizeof(i.data.dtcCodes[0]);
+
+    if (i.elm.sendQuery("03", resp, sizeof(resp), 800)) {
+        parseDtcCodes(resp, "43", list, n, kMax);
+    }
+    // Merge pending (Mode 07) codes - deduped against stored ones
+    if (n < kMax && i.elm.sendQuery("07", resp, sizeof(resp), 800)) {
+        parseDtcCodes(resp, "47", list, n, kMax);
+    }
+
+    portENTER_CRITICAL(&i.mux);
+    i.data.dtcCount = n;
+    for (uint8_t k = 0; k < n; k++) strcpy(i.data.dtcCodes[k], list[k]);
+    for (uint8_t k = n; k < kMax; k++) i.data.dtcCodes[k][0] = '\0';
+    i.data.dtcsRead = true;
+    portEXIT_CRITICAL(&i.mux);
+}
+
+// ---------------------------------------------------------------------------
 // PID polling - one per cadence expiry, sequenced so only one ELM command is
 // in flight at a time (the dongle is single-command, prompt-terminated).
 // ---------------------------------------------------------------------------
@@ -544,31 +627,31 @@ void ObdService::executeNextBackgroundQuery(Impl& i, uint32_t now, uint8_t scree
                 }
             }
             break;
-        case 5: // TPMS FL (222A05 / 222A0A on BCM 720) - skip if on TPMS (1)
+        case 5: // TPMS DID 2A05 (reports FL) on BCM 720 - skip if on TPMS (1)
             if (screen != 1) {
                 i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
-                pollTpmsCorner(i, 0, "2A05", "2A0A");
+                pollTpmsCorner(i, MX5_TPMS_WHEEL_FROM_PREDID[0], MX5_TPMS_DID_PRESSURE_0, MX5_TPMS_DID_TEMP_0);
                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
             }
             break;
-        case 6: // TPMS FR (222A06 / 222A0B on BCM 720) - skip if on TPMS (1)
+        case 6: // TPMS DID 2A06 (reports RL on this ND2) - skip if on TPMS (1)
             if (screen != 1) {
                 i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
-                pollTpmsCorner(i, 1, "2A06", "2A0B");
+                pollTpmsCorner(i, MX5_TPMS_WHEEL_FROM_PREDID[1], MX5_TPMS_DID_PRESSURE_1, MX5_TPMS_DID_TEMP_1);
                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
             }
             break;
-        case 7: // TPMS RL (222A07 / 222A0C on BCM 720) - skip if on TPMS (1)
+        case 7: // TPMS DID 2A07 (reports RR on this ND2) - skip if on TPMS (1)
             if (screen != 1) {
                 i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
-                pollTpmsCorner(i, 2, "2A07", "2A0C");
+                pollTpmsCorner(i, MX5_TPMS_WHEEL_FROM_PREDID[2], MX5_TPMS_DID_PRESSURE_2, MX5_TPMS_DID_TEMP_2);
                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
             }
             break;
-        case 8: // TPMS RR (222A08 / 222A0D on BCM 720) - skip if on TPMS (1)
+        case 8: // TPMS DID 2A08 (reports FR on this ND2) - skip if on TPMS (1)
             if (screen != 1) {
                 i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
-                pollTpmsCorner(i, 3, "2A08", "2A0D");
+                pollTpmsCorner(i, MX5_TPMS_WHEEL_FROM_PREDID[3], MX5_TPMS_DID_PRESSURE_3, MX5_TPMS_DID_TEMP_3);
                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
             }
             break;
@@ -584,6 +667,23 @@ void ObdService::executeNextBackgroundQuery(Impl& i, uint32_t now, uint8_t scree
                         i.data.tcmPrnd = prnd;
                         i.tcmDirectGear = directGear;
                         portEXIT_CRITICAL(&i.mux);
+                    }
+                }
+                i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+            }
+            break;
+        case 10: // ATF Temp (221E1C on TCM 7E1 - only on Automatic) - skip if on Fluids (2)
+            if (i.data.isAutomatic && screen != 2) {
+                i.elm.sendQuery("ATSH 7E1", resp, sizeof(resp), 150);
+                if (i.elm.sendQuery("221E1C", resp, sizeof(resp), 400)) {
+                    uint8_t ob[2];
+                    if (parseMode22Bytes(resp, "1E1C", ob, 2)) {
+                        float tempC = (float)((ob[0] << 8) | ob[1]) * 0.063f;
+                        if (tempC >= 0.0f && tempC <= 160.0f) {
+                            portENTER_CRITICAL(&i.mux);
+                            i.data.transFluidTempC = (uint8_t)(tempC + 0.5f);
+                            portEXIT_CRITICAL(&i.mux);
+                        }
                     }
                 }
                 i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
@@ -616,7 +716,7 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
     if (now - i.lastBackgroundQueryMs > 2500) {
         i.lastBackgroundQueryMs = now;
         executeNextBackgroundQuery(i, now, screen, i.backgroundStep);
-        i.backgroundStep = (i.backgroundStep + 1) % 10;
+        i.backgroundStep = (i.backgroundStep + 1) % 11;
     } else {
         // 3. View-Driven Command Queue based on active screen
         switch (screen) {
@@ -688,9 +788,9 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                 pollTpms(i, now);
                 break;
 
-            // Screen 2: Temperatures -> Coolant, Oil Temp, Intake Air, Battery
+            // Screen 2: Fluids & Electrical -> Coolant, Oil Temp, Intake Air, Battery, ATF Temp
             case 2:
-                switch (i.slowIdx % 4) {
+                switch (i.slowIdx % 5) {
                     case 0:
                         if (readUint8(i, "0105", "05", b)) {
                             portENTER_CRITICAL(&i.mux);
@@ -731,12 +831,30 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                             portEXIT_CRITICAL(&i.mux);
                         }
                         break;
+                    case 4: // ATF Temp (221E1C on TCM Header 7E1 - automatic only)
+                        if (i.data.isAutomatic) {
+                            char resp[BleElm::MAX_RESPONSE];
+                            i.elm.sendQuery("ATSH 7E1", resp, sizeof(resp), 150);
+                            if (i.elm.sendQuery("221E1C", resp, sizeof(resp), 300)) {
+                                uint8_t ob[2];
+                                if (parseMode22Bytes(resp, "1E1C", ob, 2)) {
+                                    float tempC = (float)((ob[0] << 8) | ob[1]) * 0.063f;
+                                    if (tempC >= 0.0f && tempC <= 160.0f) {
+                                        portENTER_CRITICAL(&i.mux);
+                                        i.data.transFluidTempC = (uint8_t)(tempC + 0.5f);
+                                        portEXIT_CRITICAL(&i.mux);
+                                    }
+                                }
+                            }
+                            i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+                        }
+                        break;
                 }
                 break;
 
-            // Screen 3: Diagnostic Hub -> Trims (STFT/LTFT), FRP, AFR, Spark Timing
+            // Screen 3: Engine Codes -> Fuel Trims (STFT/LTFT), FRP, AFR, Spark + DTC scan
             case 3:
-                switch (i.slowIdx % 5) {
+                switch (i.slowIdx % 6) {
                     case 0:
                         if (readUint8(i, "0106", "06", b)) {
                             portENTER_CRITICAL(&i.mux);
@@ -772,43 +890,88 @@ void ObdService::pollTick(Impl& i, uint32_t now) {
                             portEXIT_CRITICAL(&i.mux);
                         }
                         break;
+                    case 5: // Engine code scan (Mode 03 stored + 07 pending)
+                        pollDtcCodes(i);
+                        break;
                 }
                 break;
 
-            // Screen 4: Track & Dynamics (FAFO) -> Fast Speed (20Hz for 0-60 timer), Throttle %, RPM, Load %
+            // Screen 4: Torque & Power -> PCM Engine Torque % (0162) + Ref Torque (0163),
+            // RPM (for HP = TQ*lbft*rpm/5252), TCM Actual (221EE4) & Desired (221EC7) torque on 7E1
             case 4:
                 if ((i.slowIdx % 2) == 0) {
-                    // Even tick: High-rate Speed for precise 0-60 trigger/trap timing
+                    // Even tick: High-rate Speed for the sticky speed chip
                     if (readUint8(i, "010D", "0D", b)) {
                         portENTER_CRITICAL(&i.mux);
                         i.data.speedKmh = b;
                         portEXIT_CRITICAL(&i.mux);
                     }
                 } else {
-                    // Odd tick: Dynamics metrics
-                    switch ((i.slowIdx / 2) % 3) {
-                        case 0:
-                            if (readUint8(i, "0111", "11", b)) {
-                                uint8_t raw = (uint8_t)(((uint16_t)b * 100) / 255);
-                                uint8_t eff = (raw <= 13) ? 0 : (uint8_t)((((uint16_t)(raw - 13)) * 100) / 87);
-                                if (eff > 100) eff = 100;
+                    switch ((i.slowIdx / 2) % 5) {
+                        case 0: // PCM Engine Torque 01 62: A-125 (%) of reference
+                            if (readUint8(i, "0162", "62", b)) {
+                                int16_t pct = (int16_t)b - 125;
                                 portENTER_CRITICAL(&i.mux);
-                                i.data.throttlePct = eff;
+                                i.data.engineTorquePct = pct;
+                                i.data.engineTorqueNm = ((float)pct / 100.0f) * (float)i.engineTorqueRefNm;
                                 portEXIT_CRITICAL(&i.mux);
                             }
                             break;
-                        case 1:
-                            if (readUint16(i, "010C", "0C", tmp)) {
+                        case 1: // PCM Reference Torque 01 63 (Nm) - static 250 on MX-5, read once
+                            if (!i.refTorqueRead) {
+                                if (readUint16(i, "0163", "63", tmp)) {
+                                    if (tmp >= 100 && tmp <= 500) {
+                                        i.engineTorqueRefNm = tmp;
+                                        i.refTorqueRead = true;
+                                        portENTER_CRITICAL(&i.mux);
+                                        i.data.engineTorqueRefNm = tmp;
+                                        portEXIT_CRITICAL(&i.mux);
+                                        Serial.printf("[torque] 0163 reference torque = %u Nm\n", (unsigned)tmp);
+                                    }
+                                }
+                            } else if (readUint16(i, "010C", "0C", tmp)) {
                                 portENTER_CRITICAL(&i.mux);
                                 i.data.rpm = tmp / 4;
                                 portEXIT_CRITICAL(&i.mux);
                             }
                             break;
                         case 2:
-                            if (readUint8(i, "0104", "04", b)) {
+                            if (readUint16(i, "010C", "0C", tmp)) {
                                 portENTER_CRITICAL(&i.mux);
-                                i.data.engineLoadPct = (uint8_t)(((uint16_t)b * 100) / 255);
+                                i.data.rpm = tmp / 4;
                                 portEXIT_CRITICAL(&i.mux);
+                            }
+                            break;
+                        case 3: // TCM Actual Engine Torque 221EE4 (7E1) - signed16 / 50 -> Nm (6AT)
+                            if (i.data.isAutomatic) {
+                                char resp[BleElm::MAX_RESPONSE];
+                                i.elm.sendQuery("ATSH 7E1", resp, sizeof(resp), 150);
+                                if (i.elm.sendQuery("221EE4", resp, sizeof(resp), 250)) {
+                                    uint8_t ob[2];
+                                    if (parseMode22Bytes(resp, "1EE4", ob, 2)) {
+                                        int16_t raw = (int16_t)((ob[0] << 8) | ob[1]);
+                                        portENTER_CRITICAL(&i.mux);
+                                        i.data.tcmTorqueActualNm = (float)raw / 50.0f;
+                                        portEXIT_CRITICAL(&i.mux);
+                                    }
+                                }
+                                i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
+                            }
+                            break;
+                        case 4: // TCM Desired Engine Torque 221EC7 (7E1) - signed16 / 50 -> Nm (6AT)
+                            if (i.data.isAutomatic) {
+                                char resp[BleElm::MAX_RESPONSE];
+                                i.elm.sendQuery("ATSH 7E1", resp, sizeof(resp), 150);
+                                if (i.elm.sendQuery("221EC7", resp, sizeof(resp), 250)) {
+                                    uint8_t ob[2];
+                                    if (parseMode22Bytes(resp, "1EC7", ob, 2)) {
+                                        int16_t raw = (int16_t)((ob[0] << 8) | ob[1]);
+                                        portENTER_CRITICAL(&i.mux);
+                                        i.data.tcmTorqueDesiredNm = (float)raw / 50.0f;
+                                        portEXIT_CRITICAL(&i.mux);
+                                    }
+                                }
+                                i.elm.sendQuery("ATSH 7E0", resp, sizeof(resp), 150);
                             }
                             break;
                     }
@@ -1037,7 +1200,9 @@ void ObdService::pollTpmsCorner(Impl& i, uint8_t corner, const char* pressureDid
     if (i.elm.sendQuery(cmd, resp, sizeof(resp), 300)) {
         if (parseMode22Bytes(resp, tempDid, &tb, 1)) {
             portENTER_CRITICAL(&i.mux);
-            i.data.tireTemp[corner] = (float)tb - 40.0f;
+            // On US-market ND2 BCM (DIDs 2A0A..2A0D), raw byte tb is direct Fahrenheit (°F).
+            // Convert to Celsius for internal storage so Mx5UI can render cleanly in either °F or °C.
+            i.data.tireTemp[corner] = ((float)tb - 32.0f) * (5.0f / 9.0f);
             portEXIT_CRITICAL(&i.mux);
         }
     }
@@ -1051,10 +1216,17 @@ void ObdService::pollTpms(Impl& i, uint32_t now) {
     char resp[BleElm::MAX_RESPONSE];
     i.elm.sendQuery("ATSH 720", resp, sizeof(resp), 150);
 
-    const char* dids[4] = {"2A05", "2A06", "2A07", "2A08"};
-    const char* tempDids[4] = {"2A0A", "2A0B", "2A0C", "2A0D"};
+    const char* dids[4] = {MX5_TPMS_DID_PRESSURE_0, MX5_TPMS_DID_PRESSURE_1,
+                           MX5_TPMS_DID_PRESSURE_2, MX5_TPMS_DID_PRESSURE_3};
+    const char* tempDids[4] = {MX5_TPMS_DID_TEMP_0, MX5_TPMS_DID_TEMP_1,
+                               MX5_TPMS_DID_TEMP_2, MX5_TPMS_DID_TEMP_3};
     for (uint8_t k = 0; k < 4; k++) {
-        pollTpmsCorner(i, k, dids[k], tempDids[k]);
+        // DID slot k does NOT map 1:1 to a physical corner - it reports the
+        // wheel stored in MX5_TPMS_WHEEL_FROM_PREDID (see Config.h). Only
+        // DID 2A05 is Front-Left; 2A06=RL, 2A07=RR, 2A08=FR on this ND2.
+        int8_t wheel = MX5_TPMS_WHEEL_FROM_PREDID[k];
+        if (wheel < 0 || wheel >= 4) continue;   // unmapped slot
+        pollTpmsCorner(i, (uint8_t)wheel, dids[k], tempDids[k]);
     }
 
     // Restore PCM header 7E0 from Header 720
