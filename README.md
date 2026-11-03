@@ -1,15 +1,20 @@
+<p align="center">
+  <a href="https://ko-fi.com/todd0042">
+    <img src="https://raw.githubusercontent.com/Todd0042/creator-assets/main/banners/todd_creator_banner_v1.0.png" alt="Support Todd on Ko-fi" width="100%" />
+  </a>
+</p>
+
+---
+
 # 🏎️ Mazda MX-5 Miata (ND2) Digital Telemetry Dashboard
 
 [![ESP32-S3](https://img.shields.io/badge/Hardware-ESP32--S3-orange.svg)](https://www.waveshare.com/esp32-s3-touch-lcd-3.5b.htm)
-[![Android](https://img.shields.io/badge/Platform-Android%20App-green.svg)](https://developer.android.com)
 [![LVGL](https://img.shields.io/badge/UI%20Engine-LVGL%209.5-blue.svg)](https://lvgl.io)
 [![License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
 
 An open-source, automotive digital gauge cluster and telemetry system built specifically for the **Mazda MX-5 Miata (ND2 / SkyActiv-G 2.0L)**. 
 
-This repository provides **two complete, full-featured implementations**:
-1. 📟 **Dedicated Physical Display Firmware**: Built for the **Waveshare ESP32-S3-Touch-LCD-3.5B** ($480 \times 320$ capacitive touch, Bluetooth Low Energy 5.0, PSRAM, MicroSD logging).
-2. 📱 **Standalone Android Application (`OBD2Android`)**: Native Android Studio app (Kotlin + C++ LVGL engine) for smartphones, tablets, or Android head units.
+This repository provides a **dedicated physical display firmware** built for the **Waveshare ESP32-S3-Touch-LCD-3.5B** ($480 \times 320$ capacitive touch, Bluetooth Low Energy 5.0, PSRAM, MicroSD logging).
 
 ---
 
@@ -76,27 +81,6 @@ pio run -e native_preview
 
 ---
 
-### 2. Standalone Android Application (`OBD2Android`)
-
-The Android application is located in [`OBD2Android/`](file:///home/todd/Documents/GitHub/mx5-dash/OBD2Android).
-
-#### Prerequisites
-- Android Studio Ladybug or newer / JDK 17+ / Android NDK 27+.
-- Android Device running Android 8.0+ (API 26+) with Bluetooth enabled.
-
-#### Build & Install
-```bash
-cd OBD2Android
-
-# Build Debug APK
-./gradlew assembleDebug
-
-# Install directly to your connected Android phone via ADB
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
----
-
 ## 🔬 Technical Details: SkyActiv-G 2.0L Telemetry
 
 For comprehensive CAN IDs, PID formulas, and timing diagrams, see **[`ND2_TELEMETRY_NOTES.md`](ND2_TELEMETRY_NOTES.md)**.
@@ -116,3 +100,12 @@ This project solves latency using an **interleaved transaction scheduler**:
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 Developed with ❤️ for the Mazda MX-5 Miata community!
+
+---
+
+<p align="center">
+  <a href="https://ko-fi.com/todd0042">
+    <img src="https://raw.githubusercontent.com/Todd0042/creator-assets/main/banners/todd_creator_banner_v2.0.png" alt="Support Todd on Ko-fi" width="100%" />
+  </a>
+</p>
+
